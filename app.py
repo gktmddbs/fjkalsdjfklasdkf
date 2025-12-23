@@ -12,67 +12,58 @@ from typing import Optional, Tuple
 from streamlit_paste_button import paste_image_button
 from streamlit_image_comparison import image_comparison
 
-# --- [1. 기본 설정 및 프롬프트] ---
+# --- [1. 기본 설정] ---
 st.set_page_config(page_title="Nano Banana 4K", page_icon="🍌", layout="wide")
 
-# API 키 가져오기 (Secrets or 빈 값)
+# API 키 가져오기
 try:
     DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
     DEFAULT_API_KEY = ""
 
-# 모델 리스트 (3 Pro가 메인)
+# 모델 리스트
 MODELS = [
-    "gemini-3-pro-image-preview",  # 👑 [권장] 4K 지원 & 식질 최강
-    "gemini-2.0-flash-exp",        # ⚡ [속도] 빠름 (4K 미지원)
-    "gemini-2.5-flash-image",      # 📦 [물량] 일일 할당량 많음
+    "gemini-3-pro-image-preview",  # 👑 4K 지원 & 식질 최강
+    "gemini-2.0-flash-exp",        # ⚡ 빠름 (4K 미지원)
+    "gemini-2.5-flash-image",      # 📦 물량 많음
 ]
 
-# --- [전문가용 프롬프트 (3단계 공정)] ---
-PROMPT_STEP1 = """
+# --- [2. 한국어 기본 프롬프트 설정] ---
+# 사용자가 수정 가능하도록 변수로 분리했습니다.
+
+DEFAULT_PROMPT_STEP1 = """
 # Role
-You are the world's best 'Manga Typesetter' and 'Translator'.
+당신은 세계 최고의 만화 번역가이자 식자(Typesetter)입니다.
 
-# 1. 🎭 Super-Resolution Translation (초월 번역)
-- **Language:** Translate Japanese/English text to **Korean**.
-- **Tone & Voice:** Analyze the characters' facial expressions and atmosphere.
-  - Angry = Rough/Short words.
-  - Shy/Sad = Hesitant/Soft words.
-  - Senior/Junior = Reflect honorifics (Jondaemal/Banmal).
-- **Style:** Use natural Korean Webtoon style (Not machine translation style).
-
-# 2. 📐 Absolute Layout Rules (가로쓰기 강제)
-- **[CRITICAL] HORIZONTAL ONLY:** All text MUST be written **Left-to-Right**. Vertical text is strictly FORBIDDEN.
-- **Bubble Expansion:** If a speech bubble is too narrow for horizontal text, **EXTEND the white background horizontally** (Overpaint) to fit the text. Do NOT squash the text.
-- **Line Breaks:** Use frequent line breaks to fit text naturally.
-
-# 3. 🎨 In-painting
-- **Background Restoration:** Perfectly restore screen tones, speed lines, and background art behind the text.
-- **Clean:** Remove ALL original text completely.
+# Task
+1. 이미지 내의 일본어/영어를 **한국어**로 번역하세요.
+   - 문맥과 캐릭터의 표정을 파악하여 자연스러운 웹툰체로 번역하세요.
+2. **[중요] 가로쓰기 강제:** 모든 텍스트는 반드시 **왼쪽에서 오른쪽(가로)**으로 쓰세요. 세로쓰기는 절대 금지입니다.
+3. **식질(In-painting):** 글자를 지운 배경(스크린톤, 효과선)을 위화감 없이 완벽하게 복원하세요.
+4. **Clean:** 원본 글자는 깨끗하게 지우세요.
 """
 
-PROMPT_STEP2_FIX = """
+DEFAULT_PROMPT_STEP2 = """
 # Task
-The input image is a translated manga page. **FIX ALL Vertical Text to Horizontal**.
+방금 번역된 만화 이미지의 레이아웃을 교정하세요.
 
 # Actions
-1. **Detect:** Find any text written Top-to-Bottom.
-2. **Rewrite:** Erase it and rewrite it **Left-to-Right (Horizontal)**.
-3. **Expand:** If the bubble is too thin, **PAINT WHITE** over the background to widen it.
-4. **Preserve:** Do not change the meaning of the text. Just change the orientation.
+1. **세로쓰기 감지:** 위에서 아래로(세로로) 써진 텍스트를 찾으세요.
+2. **가로로 다시 쓰기:** 해당 텍스트를 지우고, **왼쪽에서 오른쪽(가로)** 방향으로 다시 쓰세요.
+3. **말풍선 확장:** 가로로 쓸 공간이 부족하다면, 말풍선 배경을 하얗게 칠해서 옆으로 넓히세요. (글자를 찌그러뜨리지 마세요)
 """
 
-PROMPT_STEP3_UPSCALE = """
+DEFAULT_PROMPT_STEP3 = """
 # Task
-**RE-RENDER** this manga page in **4K Ultra-High Resolution**.
+이 이미지를 **4K 초고해상도**로 다시 렌더링(Re-render)하세요.
 
 # Guidelines
-1. **Denoise & Vectorize:** Remove all JPEG artifacts and noise. Make lines vector-sharp and crisp.
-2. **Contrast:** Enhance black & white contrast (Digital Scan Quality).
-3. **Preserve Content:** Do NOT change text content or character designs. Only enhance the visual fidelity.
+1. **화질 개선:** 노이즈를 제거하고 선을 벡터처럼 선명하게 만드세요.
+2. **명암비:** 흑백 명암을 뚜렷하게 보정하세요 (디지털 스캔 품질).
+3. **보존:** 텍스트의 내용이나 캐릭터의 생김새는 절대 바꾸지 마세요. 오직 화질만 높이세요.
 """
 
-# --- [2. 유틸리티 함수] ---
+# --- [3. 유틸리티 함수] ---
 def init_session_state():
     defaults = {
         'job_queue': [],
@@ -114,22 +105,18 @@ def save_to_local_folder(folder_name):
     except Exception as e:
         st.error(f"저장 실패: {e}")
 
-# --- [3. 핵심 AI 로직 (New SDK)] ---
+# --- [4. AI 생성 로직 (New SDK)] ---
 
 def generate_with_new_sdk(client, model_name, prompt, image_input, apply_4k=False):
-    """
-    google-genai (최신 SDK)를 사용하여 이미지 생성.
-    'apply_4k=True'일 때 image_size="4K" 설정을 강제 주입.
-    """
+    """최신 SDK 사용 생성 함수"""
     try:
         image_bytes = image_to_bytes(image_input)
         
-        # 기본 설정
         config_params = {
             "response_modalities": ["IMAGE"],
         }
 
-        # ✅ 4K 강제 설정 (3.0 모델 + 업스케일 단계일 때)
+        # 4K 옵션 적용 (3 Pro 모델 & 업스케일 단계일 때)
         if apply_4k and "gemini-3" in model_name:
             config_params["image_config"] = types.ImageConfig(
                 image_size="4K"
@@ -144,7 +131,6 @@ def generate_with_new_sdk(client, model_name, prompt, image_input, apply_4k=Fals
             config=types.GenerateContentConfig(**config_params)
         )
         
-        # 결과 파싱
         if response.parts:
             for part in response.parts:
                 if part.inline_data:
@@ -152,7 +138,6 @@ def generate_with_new_sdk(client, model_name, prompt, image_input, apply_4k=Fals
                 if hasattr(part, 'image') and part.image:
                      return part.image, None
         
-        # 간혹 response.image에 직접 들어오는 경우
         if hasattr(response, 'image') and response.image:
              return response.image, None
 
@@ -161,48 +146,45 @@ def generate_with_new_sdk(client, model_name, prompt, image_input, apply_4k=Fals
     except Exception as e:
         return None, f"API 에러: {str(e)}"
 
-def run_pipeline(api_key, model_name, image_input, use_fix, use_upscale):
+def run_pipeline(api_key, model_name, image_input, use_fix, use_upscale, p1, p2, p3):
     """
-    3단계 공정 (번역 -> 교정 -> 4K) 파이프라인
+    사용자 정의 프롬프트(p1, p2, p3)를 받아 실행하는 파이프라인
     """
     try:
         client = genai.Client(api_key=api_key)
         current_img = image_input
         
         # Step 1: 번역
-        res1, err = generate_with_new_sdk(client, model_name, PROMPT_STEP1, current_img, apply_4k=False)
-        if err: return None, f"1단계(번역) 실패: {err}"
+        res1, err = generate_with_new_sdk(client, model_name, p1, current_img, apply_4k=False)
+        if err: return None, f"1단계 실패: {err}"
         current_img = res1
 
-        # Step 2: 교정 (선택)
+        # Step 2: 교정
         if use_fix:
-            res2, err = generate_with_new_sdk(client, model_name, PROMPT_STEP2_FIX, current_img, apply_4k=False)
-            if not err and res2: 
-                current_img = res2
-            # 교정 실패시엔 그냥 1단계 결과 유지
+            res2, err = generate_with_new_sdk(client, model_name, p2, current_img, apply_4k=False)
+            if not err and res2: current_img = res2
 
-        # Step 3: 4K 업스케일 (선택)
+        # Step 3: 4K 업스케일
         if use_upscale:
-            res3, err = generate_with_new_sdk(client, model_name, PROMPT_STEP3_UPSCALE, current_img, apply_4k=True)
+            res3, err = generate_with_new_sdk(client, model_name, p3, current_img, apply_4k=True)
             if not err and res3:
                 current_img = res3
             elif err:
-                return None, f"3단계(4K) 실패: {err}"
+                return None, f"3단계 실패: {err}"
 
         return current_img, None
 
     except Exception as e:
-        return None, f"파이프라인 치명적 오류: {e}"
+        return None, f"파이프라인 오류: {e}"
 
-def process_and_update(item, api_key, model, use_fix, use_upscale):
-    """단일 아이템 처리 및 상태 업데이트"""
-    
+def process_and_update(item, api_key, model, use_fix, use_upscale, p1, p2, p3):
     steps_msg = "번역"
     if use_fix: steps_msg += " → 교정"
     if use_upscale: steps_msg += " → 4K 변환"
 
     with st.spinner(f"작업 중... [{steps_msg}]"):
-        res_img, err = run_pipeline(api_key, model, item['image'], use_fix, use_upscale)
+        # 프롬프트 전달
+        res_img, err = run_pipeline(api_key, model, item['image'], use_fix, use_upscale, p1, p2, p3)
         
         if res_img:
             st.session_state.results.append({
@@ -216,29 +198,38 @@ def process_and_update(item, api_key, model, use_fix, use_upscale):
             item['error_msg'] = err
             st.rerun()
 
-# --- [4. UI 컴포넌트] ---
+# --- [5. UI 컴포넌트] ---
 def render_sidebar():
     with st.sidebar:
         st.title("🍌 Nano Banana 4K")
-        st.caption("Real 4K Resolution & 3-Step Pipeline")
+        st.caption("Real 4K & Custom Prompts")
         
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
         model = st.selectbox("모델 선택", MODELS, index=0)
         
         if "gemini-3" in model:
-            st.success("✨ **4K 옵션 활성화 가능**")
+            st.success("✨ **4K 옵션 지원됨**")
         else:
             st.warning("⚠️ 이 모델은 4K 설정을 무시할 수 있습니다.")
 
         st.divider()
         st.subheader("⚙️ 공정 설정")
-        use_fix = st.toggle("가로쓰기 강제 교정 (Step 2)", value=True, help="번역 후 세로쓰기가 남아있으면 다시 고칩니다.")
-        use_upscale = st.toggle("4K 리마스터링 (Step 3)", value=True, help="Gemini 3 Pro의 '4K' 옵션을 켜서 초고화질로 다시 그립니다.")
+        use_fix = st.toggle("가로쓰기 강제 교정 (Step 2)", value=True)
+        use_upscale = st.toggle("4K 리마스터링 (Step 3)", value=True)
         
+        # --- [프롬프트 커스텀 영역] ---
+        st.divider()
+        with st.expander("📝 프롬프트 설정 (한국어)", expanded=False):
+            st.caption("AI에게 내릴 지시사항을 직접 수정하세요.")
+            p1 = st.text_area("Step 1 (번역/식질)", value=DEFAULT_PROMPT_STEP1, height=200)
+            p2 = st.text_area("Step 2 (레이아웃 교정)", value=DEFAULT_PROMPT_STEP2, height=150)
+            p3 = st.text_area("Step 3 (4K 업스케일)", value=DEFAULT_PROMPT_STEP3, height=150)
+        # ---------------------------
+
         st.divider()
         use_slider = st.toggle("비교 슬라이더 사용", value=True)
         
-        return api_key, model, use_slider, use_fix, use_upscale
+        return api_key, model, use_slider, use_fix, use_upscale, p1, p2, p3
 
 def handle_file_upload():
     col1, col2 = st.columns([3, 1])
@@ -282,7 +273,7 @@ def handle_file_upload():
             st.session_state.last_pasted_hash = curr_hash
             st.rerun()
 
-def render_queue(api_key, model, use_fix, use_upscale):
+def render_queue(api_key, model, use_fix, use_upscale, p1, p2, p3):
     if not st.session_state.job_queue:
         st.info("대기열이 비어있습니다.")
         return
@@ -309,7 +300,7 @@ def render_queue(api_key, model, use_fix, use_upscale):
         st.rerun()
 
     if st.session_state.is_auto_running:
-        st.progress(100, text="🔄 자동 처리 중... (Step 1~3 진행 중)")
+        st.progress(100, text="🔄 자동 처리 중... (1~3단계)")
 
     with st.container():
         for i, item in enumerate(st.session_state.job_queue):
@@ -321,7 +312,7 @@ def render_queue(api_key, model, use_fix, use_upscale):
                     elif item['status'] == 'pending': st.info("⏳ 대기 중")
                 with cols[2]:
                     if st.button("▶️ 실행", key=f"run_{item['id']}", use_container_width=True):
-                        process_and_update(item, api_key, model, use_fix, use_upscale)
+                        process_and_update(item, api_key, model, use_fix, use_upscale, p1, p2, p3)
                     if st.button("🗑️ 삭제", key=f"del_{item['id']}", use_container_width=True):
                         st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
                         st.rerun()
@@ -366,7 +357,7 @@ def render_results(use_slider):
                 item['result'].save(buf, format="PNG")
                 st.download_button("⬇️ 다운로드", data=buf.getvalue(), file_name=f"4K_{item['name']}", mime="image/png", key=f"dl_{item['id']}", use_container_width=True)
 
-def auto_process_step(api_key, model, use_fix, use_upscale):
+def auto_process_step(api_key, model, use_fix, use_upscale, p1, p2, p3):
     if not st.session_state.is_auto_running: return
     pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
     
@@ -384,7 +375,7 @@ def auto_process_step(api_key, model, use_fix, use_upscale):
     if use_upscale: steps_msg += "→4K"
 
     with st.spinner(f"자동 처리 중... {item['name']} ({steps_msg})"):
-        res_img, err = run_pipeline(api_key, model, item['image'], use_fix, use_upscale)
+        res_img, err = run_pipeline(api_key, model, item['image'], use_fix, use_upscale, p1, p2, p3)
         
         if res_img:
             st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
@@ -393,23 +384,25 @@ def auto_process_step(api_key, model, use_fix, use_upscale):
             item['status'] = 'error'
             item['error_msg'] = err
     
-    time.sleep(1) # 쿨타임
+    time.sleep(1)
     st.rerun()
 
-# --- [5. 메인 실행] ---
+# --- [6. 메인 실행] ---
 def main():
     init_session_state()
-    api_key, model, use_slider, use_fix, use_upscale = render_sidebar()
+    # 사이드바에서 프롬프트 값(p1, p2, p3)을 받아옴
+    api_key, model, use_slider, use_fix, use_upscale, p1, p2, p3 = render_sidebar()
     
     st.title("🍌 Nano Banana 4K")
-    st.markdown("**Real 4K Resolution** powered by `google-genai` SDK & Gemini 3 Pro")
+    st.markdown("**Real 4K & Custom Prompt Edition**")
     
     handle_file_upload()
-    render_queue(api_key, model, use_fix, use_upscale)
+    # 프롬프트 값을 렌더링 함수에 전달
+    render_queue(api_key, model, use_fix, use_upscale, p1, p2, p3)
     render_results(use_slider)
 
     if st.session_state.is_auto_running:
-        auto_process_step(api_key, model, use_fix, use_upscale)
+        auto_process_step(api_key, model, use_fix, use_upscale, p1, p2, p3)
 
 if __name__ == "__main__":
     main()
