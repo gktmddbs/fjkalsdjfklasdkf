@@ -12,42 +12,43 @@ from streamlit_paste_button import paste_image_button
 from streamlit_image_comparison import image_comparison
 
 # --- [1. 기본 설정] ---
-st.set_page_config(page_title="Nano Banana (Perfectionist)", page_icon="🍌", layout="wide")
+st.set_page_config(page_title="Nano Banana One-Shot", page_icon="🍌", layout="wide")
 
 try:
     DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
     DEFAULT_API_KEY = ""
 
+# 모델 리스트 (3 Pro가 4K 지원 핵심)
 MODELS = [
-    "gemini-3-pro-image-preview",  # 👑 4K 지원 (필수)
-    "gemini-2.0-flash-exp",        # ⚡ 2K (빠름)
+    "gemini-3-pro-image-preview",  # 👑 4K 지원 & 지능 최강
+    "gemini-2.0-flash-exp",        # ⚡ 빠름 (4K 미지원, 2K 수준)
 ]
 
-# --- [2. 사용자 요청 프롬프트 적용] ---
+# --- [2. 원샷 프롬프트 (강력함)] ---
+# 번역 + 식질 + 4K 변환을 한 번에 시키는 프롬프트입니다.
 DEFAULT_PROMPT = """
 # Role
-당신은 세계 최고의 만화 번역가이자 편집자이다. 당신은 완벽 주의자 여서 실수를 하면 심장마비로 사망한다.
+당신은 세계 최고의 만화 번역가이자 편집자입니다.
 
 # Task
-제공된 만화 이미지를 **한국어**로 번역하고 식질하여 **4K 초고해상도**로 출력해라
+제공된 만화 이미지를 **한국어**로 번역하고 식질하여 **4K 초고해상도**로 출력하세요.
 
 # Critical Rules (반드시 준수)
 1. **번역 (Translation):**
-   - 일본어/영어를 문맥에 맞는 자연스러운 **한국어**로 번역해라.
-   - 캐릭터의 표정(화남, 부끄러움 등)과 캐릭터의 성격에 맞춰 어조를 조절해라.
+   - 일본어/영어를 문맥에 맞는 자연스러운 **한국어(웹툰체)**로 번역하세요.
+   - 캐릭터의 표정(화남, 부끄러움 등)에 맞춰 어조를 조절하세요.
 
 2. **레이아웃 (Layout):**
-   별*9999999:가로쓰기를 해라 (안하면 사망)
+   - 🚫 **세로쓰기 절대 금지:** 모든 텍스트는 반드시 **왼쪽에서 오른쪽(가로)**으로 쓰세요.
+   - ✅ **말풍선 확장:** 가로로 쓸 공간이 좁다면, **말풍선 배경을 하얗게 덧칠해서 옆으로 넓히세요.** 글자를 찌그러뜨리지 마세요.
 
 3. **화질 (Quality):**
-   - 원본의 노이즈를 제거하고 선을 선명하게 다듬어라 (Digital Scan Quality).
-   - 배경(스크린톤)을 완벽하게 복원해라
-
-4. 그림을 절대로 훼손하지 말고 무엇도 추가하지 마라
+   - 원본의 노이즈를 제거하고 선을 선명하게 다듬으세요 (Digital Scan Quality).
+   - 배경(스크린톤)을 완벽하게 복원하세요.
 
 # Output
-설명 없이, 작업이 완료된 **이미지 파일**만 출력해라.
+설명 없이, 작업이 완료된 **이미지 파일**만 출력하세요.
 """
 
 # --- [3. 유틸리티] ---
@@ -92,27 +93,25 @@ def save_to_local_folder(folder_name):
     except Exception as e:
         st.error(f"저장 실패: {e}")
 
-# --- [4. AI 생성 로직 (4K + 정밀도)] ---
+# --- [4. AI 생성 로직 (One-Shot)] ---
 def generate_one_shot(api_key, model_name, prompt, image_input):
+    """
+    한 번의 호출로 번역+식질+4K출력을 끝냅니다.
+    """
     try:
         client = genai.Client(api_key=api_key)
         image_bytes = image_to_bytes(image_input)
         
+        # 설정 준비
         config_params = {
             "response_modalities": ["IMAGE"],
         }
 
-        # 👑 Gemini 3 Pro일 때만 4K 옵션 적용
+        # 👑 Gemini 3 Pro일 때만 '4K' 옵션 강제 주입
         if "gemini-3" in model_name:
             config_params["image_config"] = types.ImageConfig(
-                image_size="4K"
+                image_size="4K"  # <--- 핵심: 여기서 4K로 뻥튀기됨
             )
-
-        # ✅ 창의성 억제 (환각 방지)
-        gen_config = types.GenerateContentConfig(
-            temperature=0.1,  # 0.1로 낮춰서 시키는 대로만 하게 함
-            **config_params
-        )
 
         # API 호출
         response = client.models.generate_content(
@@ -121,9 +120,10 @@ def generate_one_shot(api_key, model_name, prompt, image_input):
                 prompt,
                 types.Part.from_bytes(data=image_bytes, mime_type="image/png")
             ],
-            config=gen_config
+            config=types.GenerateContentConfig(**config_params)
         )
         
+        # 결과 이미지 추출
         if response.parts:
             for part in response.parts:
                 if part.inline_data:
@@ -134,13 +134,14 @@ def generate_one_shot(api_key, model_name, prompt, image_input):
         if hasattr(response, 'image') and response.image:
              return response.image, None
 
-        return None, "이미지 생성 실패 (AI 거부)"
+        return None, "이미지 생성 실패 (AI가 거부함)"
 
     except Exception as e:
         return None, f"API 에러: {str(e)}"
 
 def process_and_update(item, api_key, model, prompt):
-    with st.spinner(f"🔥 완벽주의 식질 중... ({item['name']})"):
+    """작업 실행기"""
+    with st.spinner(f"✨ 4K 번역/식질 중... ({item['name']})"):
         res_img, err = generate_one_shot(api_key, model, prompt, item['image'])
         
         if res_img:
@@ -159,17 +160,22 @@ def process_and_update(item, api_key, model, prompt):
 def render_sidebar():
     with st.sidebar:
         st.title("🍌 Nano Banana")
-        st.caption("Perfectionist Edition")
+        st.caption("One-Shot 4K Translation")
         
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
         model = st.selectbox("모델 선택", MODELS, index=0)
         
+        if "gemini-3" in model:
+            st.success("✅ **4K 고화질 모드 활성화**")
+        else:
+            st.info("⚡ 빠른 모드 (2K 화질)")
+
         st.divider()
         use_slider = st.toggle("비교 슬라이더 보기", value=True)
         
         st.divider()
-        with st.expander("📝 프롬프트 (수정 가능)", expanded=True):
-            prompt = st.text_area("AI 지시사항", value=DEFAULT_PROMPT, height=400)
+        with st.expander("📝 프롬프트 수정 (한국어)", expanded=False):
+            prompt = st.text_area("AI 지시사항", value=DEFAULT_PROMPT, height=350)
         
         return api_key, model, use_slider, prompt
 
@@ -242,7 +248,7 @@ def render_queue(api_key, model, prompt):
         st.rerun()
 
     if st.session_state.is_auto_running:
-        st.progress(100, text="🔄 완벽주의자 모드 작동 중...")
+        st.progress(100, text="🔄 자동 처리 중... (One-Shot 4K)")
 
     with st.container():
         for i, item in enumerate(st.session_state.job_queue):
@@ -330,8 +336,8 @@ def main():
     init_session_state()
     api_key, model, use_slider, prompt = render_sidebar()
     
-    st.title("🍌 Nano Banana")
-    st.markdown("**Perfectionist Edition** (with High-Stakes Prompting)")
+    st.title("🍌 Nano Banana One-Shot")
+    st.markdown("**한 방에 끝내는 4K 식질** (Powered by Gemini 3 Pro)")
     
     handle_file_upload()
     render_queue(api_key, model, prompt)
