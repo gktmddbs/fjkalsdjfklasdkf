@@ -1,6 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from google import genai
+from google.genai import types
 from PIL import Image
 import io
 import os
@@ -12,60 +12,74 @@ from typing import Optional, Tuple
 from streamlit_paste_button import paste_image_button
 from streamlit_image_comparison import image_comparison
 
-# --- [1. 기본 설정 및 상수] ---
-# secrets 파일이 없으면 빈 값으로 시작 (에러 방지)
+# --- [1. 기본 설정 및 프롬프트] ---
+st.set_page_config(page_title="Nano Banana 4K", page_icon="🍌", layout="wide")
+
+# API 키 가져오기 (Secrets or 빈 값)
 try:
     DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
     DEFAULT_API_KEY = ""
 
-# ✅ 2025 최신 모델 리스트 (사용자 요청 반영)
+# 모델 리스트 (3 Pro가 메인)
 MODELS = [
-    "gemini-3-pro-image-preview",  # 👑 [추천] 식질/화질 끝판왕 (Nano Banana Pro)
-    "gemini-2.5-flash-image",      # ⚡ [속도] 가성비 모델 (Nano Banana)
-    "gemini-1.5-pro",              # 🛡️ [안전] 구관이 명관 (백업용)
+    "gemini-3-pro-image-preview",  # 👑 [권장] 4K 지원 & 식질 최강
+    "gemini-2.0-flash-exp",        # ⚡ [속도] 빠름 (4K 미지원)
+    "gemini-2.5-flash-image",      # 📦 [물량] 일일 할당량 많음
 ]
 
-RESOLUTIONS = ["원본 유지 (Original)", "1024", "1280", "1920", "2048"]
-
-# ✅ 강력한 식질 프롬프트 (Gemini 3 추론 능력 활용)
-DEFAULT_PROMPT = """
+# --- [전문가용 프롬프트 (3단계 공정)] ---
+PROMPT_STEP1 = """
 # Role
-You are the world's best 'Manga Typesetter' and 'Translator', powered by Gemini 3 Pro.
+You are the world's best 'Manga Typesetter' and 'Translator'.
 
 # 1. 🎭 Super-Resolution Translation (초월 번역)
-Analyze the characters' emotions, atmosphere, and context deeply.
-- **Tone:** If the character is angry, use rough Korean. If shy, use hesitant Korean.
-- **Context:** Infer relationships (Senpai/Kohai) and reflect them in honorifics (Jondaemal/Banmal).
-- **Naturalness:** Use natural Korean spoken style (Webtoon style).
+- **Language:** Translate Japanese/English text to **Korean**.
+- **Tone & Voice:** Analyze the characters' facial expressions and atmosphere.
+  - Angry = Rough/Short words.
+  - Shy/Sad = Hesitant/Soft words.
+  - Senior/Junior = Reflect honorifics (Jondaemal/Banmal).
+- **Style:** Use natural Korean Webtoon style (Not machine translation style).
 
 # 2. 📐 Absolute Layout Rules (가로쓰기 강제)
-Readability is King.
-- **[CRITICAL] HORIZONTAL TEXT ONLY:** All text MUST be written **Left-to-Right**. Vertical text is strictly FORBIDDEN.
-- **Bubble Expansion:** If a speech bubble is too narrow for horizontal text, **EXTEND the white bubble horizontally** (overpaint the background) to fit the text.
+- **[CRITICAL] HORIZONTAL ONLY:** All text MUST be written **Left-to-Right**. Vertical text is strictly FORBIDDEN.
+- **Bubble Expansion:** If a speech bubble is too narrow for horizontal text, **EXTEND the white background horizontally** (Overpaint) to fit the text. Do NOT squash the text.
 - **Line Breaks:** Use frequent line breaks to fit text naturally.
 
-# 3. 🎨 4K In-painting
-- Restore the background (screen tones, speed lines) perfectly behind the text.
-- Output the image in the **highest possible resolution** (Crisp & Clean).
-- **Remove** all original Japanese text completely.
-
-# Output
-Return ONLY the edited image file. No JSON, No text.
+# 3. 🎨 In-painting
+- **Background Restoration:** Perfectly restore screen tones, speed lines, and background art behind the text.
+- **Clean:** Remove ALL original text completely.
 """
 
-st.set_page_config(page_title="Nano Banana 3.0", page_icon="🍌", layout="wide")
+PROMPT_STEP2_FIX = """
+# Task
+The input image is a translated manga page. **FIX ALL Vertical Text to Horizontal**.
 
-# --- [2. 초기화 및 유틸리티] ---
+# Actions
+1. **Detect:** Find any text written Top-to-Bottom.
+2. **Rewrite:** Erase it and rewrite it **Left-to-Right (Horizontal)**.
+3. **Expand:** If the bubble is too thin, **PAINT WHITE** over the background to widen it.
+4. **Preserve:** Do not change the meaning of the text. Just change the orientation.
+"""
+
+PROMPT_STEP3_UPSCALE = """
+# Task
+**RE-RENDER** this manga page in **4K Ultra-High Resolution**.
+
+# Guidelines
+1. **Denoise & Vectorize:** Remove all JPEG artifacts and noise. Make lines vector-sharp and crisp.
+2. **Contrast:** Enhance black & white contrast (Digital Scan Quality).
+3. **Preserve Content:** Do NOT change text content or character designs. Only enhance the visual fidelity.
+"""
+
+# --- [2. 유틸리티 함수] ---
 def init_session_state():
     defaults = {
         'job_queue': [],
         'results': [],
         'uploader_key': 0,
         'last_pasted_hash': None,
-        'is_auto_running': False,
-        'allow_mod': True,
-        'use_upscale': False
+        'is_auto_running': False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -76,14 +90,10 @@ def get_image_hash(image: Image.Image) -> str:
     image.save(img_byte_arr, format='PNG')
     return hashlib.md5(img_byte_arr.getvalue()).hexdigest()
 
-def resize_image_if_needed(image: Image.Image, max_width_setting: str) -> Image.Image:
-    if max_width_setting == "원본 유지 (Original)":
-        return image
-    target_width = int(max_width_setting)
-    if image.width > target_width:
-        ratio = target_width / float(image.width)
-        return image.resize((target_width, int(float(image.height) * ratio)), Image.Resampling.LANCZOS)
-    return image
+def image_to_bytes(image: Image.Image) -> bytes:
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='PNG')
+    return img_byte_arr.getvalue()
 
 def save_to_local_folder(folder_name):
     if not folder_name:
@@ -93,7 +103,7 @@ def save_to_local_folder(folder_name):
         os.makedirs(folder_name, exist_ok=True)
         count = 0
         for item in st.session_state.results:
-            safe_name = f"edited_{item['name']}"
+            safe_name = f"4K_{item['name']}"
             if not safe_name.lower().endswith('.png'):
                 safe_name = os.path.splitext(safe_name)[0] + ".png"
             
@@ -104,120 +114,96 @@ def save_to_local_folder(folder_name):
     except Exception as e:
         st.error(f"저장 실패: {e}")
 
-# --- [3. AI 처리 로직 (Core)] ---
+# --- [3. 핵심 AI 로직 (New SDK)] ---
 
-def get_generation_config():
-    return genai.types.GenerationConfig(
-        candidate_count=1,
-        max_output_tokens=8192, # 토큰 수는 8192 정도면 충분합니다 (안전하게 변경)
-        temperature=0.2
-        # response_mime_type 라인 삭제함
-    )
-
-def upscale_with_gemini(api_key: str, image: Image.Image) -> Image.Image:
-    """Gemini 3 Pro를 이용한 4K 리마스터링"""
+def generate_with_new_sdk(client, model_name, prompt, image_input, apply_4k=False):
+    """
+    google-genai (최신 SDK)를 사용하여 이미지 생성.
+    'apply_4k=True'일 때 image_size="4K" 설정을 강제 주입.
+    """
     try:
-        genai.configure(api_key=api_key)
-        # 업스케일링은 무조건 성능 좋은 3 Pro 사용
-        model = genai.GenerativeModel("gemini-3-pro-image-preview") 
+        image_bytes = image_to_bytes(image_input)
         
-        prompt = """
-        # Task
-        **RE-RENDER** this manga page in **4K Ultra-High Resolution**.
-        
-        # Guidelines
-        1. **Denoise & Vectorize:** Remove all JPEG artifacts/noise. Make lines vector-sharp and crisp.
-        2. **Preserve Content:** Do NOT change text contents or character designs. Only enhance the visual quality.
-        3. **Contrast:** Make blacks deeper and whites brighter (Digital Scan Quality).
-        
-        # Output
-        Return only the high-quality image.
-        """
-        
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE
+        # 기본 설정
+        config_params = {
+            "response_modalities": ["IMAGE"],
         }
 
-        response = model.generate_content(
-            [prompt, image], 
-            safety_settings=safety_settings,
-            generation_config=get_generation_config()
-        )
-            
-        if hasattr(response, 'parts'):
-            for part in response.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    return Image.open(io.BytesIO(part.inline_data.data))
-                elif hasattr(part, 'image') and part.image:
-                    return part.image
-        # 데이터가 없으면 원본 반환
-        return image
-    except Exception as e:
-        print(f"Upscale Fail: {e}")
-        return image
+        # ✅ 4K 강제 설정 (3.0 모델 + 업스케일 단계일 때)
+        if apply_4k and "gemini-3" in model_name:
+            config_params["image_config"] = types.ImageConfig(
+                image_size="4K"
+            )
 
-def process_single_image(api_key: str, model_name: str, image_input: Image.Image, prompt: str, max_width: str, allow_mod: bool, use_upscale: bool) -> Tuple[Optional[Image.Image], Optional[str]]:
-    try:
-        processed_input = resize_image_if_needed(image_input, max_width)
-        genai.configure(api_key=api_key)
-        
-        final_prompt = prompt
-        if allow_mod:
-            final_prompt += """
-            \n# 🛠️ [CRITICAL: BUBBLE MODIFICATION]
-            If the bubble is too narrow for horizontal text:
-            1. **OVERPAINT**: Extend the white background horizontally.
-            2. **PRIORITY**: Horizontal Text Readability > Original Bubble Shape.
-            """
-
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE
-        }
-        
-        model = genai.GenerativeModel(model_name)
-        
-        # 1차 생성: 번역 및 식질
-        response = model.generate_content(
-            [final_prompt, processed_input], 
-            safety_settings=safety_settings,
-            generation_config=get_generation_config()
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+            ],
+            config=types.GenerateContentConfig(**config_params)
         )
         
-        result_image = None
-        if not response.candidates:
-            return None, "AI 응답 거부 (필터/과부하)"
-        
-        # 이미지 추출
-        if hasattr(response, 'parts'):
+        # 결과 파싱
+        if response.parts:
             for part in response.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    result_image = Image.open(io.BytesIO(part.inline_data.data))
-                elif hasattr(part, 'image') and part.image:
-                    result_image = part.image
+                if part.inline_data:
+                    return Image.open(io.BytesIO(part.inline_data.data)), None
+                if hasattr(part, 'image') and part.image:
+                     return part.image, None
         
-        if not result_image:
-            return None, "이미지 생성 실패"
+        # 간혹 response.image에 직접 들어오는 경우
+        if hasattr(response, 'image') and response.image:
+             return response.image, None
 
-        # 2차 생성: 업스케일링 (옵션)
-        if use_upscale:
-            result_image = upscale_with_gemini(api_key, result_image)
-
-        return result_image, None
+        return None, "이미지 생성 실패 (데이터 없음)"
 
     except Exception as e:
         return None, f"API 에러: {str(e)}"
 
-def process_and_update(item, api_key, model, prompt, resolution, allow_bubble_mod, use_upscale):
-    """아이템 처리 및 세션 업데이트"""
-    msg = "✨ Gemini 3 Pro 리마스터링 중..." if use_upscale else "번역 및 식질 중..."
-    with st.spinner(f"{item['name']} 처리 중... ({msg})"):
-        res_img, err = process_single_image(api_key, model, item['image'], prompt, resolution, allow_bubble_mod, use_upscale)
+def run_pipeline(api_key, model_name, image_input, use_fix, use_upscale):
+    """
+    3단계 공정 (번역 -> 교정 -> 4K) 파이프라인
+    """
+    try:
+        client = genai.Client(api_key=api_key)
+        current_img = image_input
+        
+        # Step 1: 번역
+        res1, err = generate_with_new_sdk(client, model_name, PROMPT_STEP1, current_img, apply_4k=False)
+        if err: return None, f"1단계(번역) 실패: {err}"
+        current_img = res1
+
+        # Step 2: 교정 (선택)
+        if use_fix:
+            res2, err = generate_with_new_sdk(client, model_name, PROMPT_STEP2_FIX, current_img, apply_4k=False)
+            if not err and res2: 
+                current_img = res2
+            # 교정 실패시엔 그냥 1단계 결과 유지
+
+        # Step 3: 4K 업스케일 (선택)
+        if use_upscale:
+            res3, err = generate_with_new_sdk(client, model_name, PROMPT_STEP3_UPSCALE, current_img, apply_4k=True)
+            if not err and res3:
+                current_img = res3
+            elif err:
+                return None, f"3단계(4K) 실패: {err}"
+
+        return current_img, None
+
+    except Exception as e:
+        return None, f"파이프라인 치명적 오류: {e}"
+
+def process_and_update(item, api_key, model, use_fix, use_upscale):
+    """단일 아이템 처리 및 상태 업데이트"""
+    
+    steps_msg = "번역"
+    if use_fix: steps_msg += " → 교정"
+    if use_upscale: steps_msg += " → 4K 변환"
+
+    with st.spinner(f"작업 중... [{steps_msg}]"):
+        res_img, err = run_pipeline(api_key, model, item['image'], use_fix, use_upscale)
+        
         if res_img:
             st.session_state.results.append({
                 'id': str(uuid.uuid4()), 'name': item['name'], 
@@ -233,51 +219,38 @@ def process_and_update(item, api_key, model, prompt, resolution, allow_bubble_mo
 # --- [4. UI 컴포넌트] ---
 def render_sidebar():
     with st.sidebar:
-        st.title("🍌 Nano Banana 3.0")
-        st.caption("Powered by Gemini 3 Pro")
+        st.title("🍌 Nano Banana 4K")
+        st.caption("Real 4K Resolution & 3-Step Pipeline")
         
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
-        
         model = st.selectbox("모델 선택", MODELS, index=0)
         
         if "gemini-3" in model:
-            st.success("🚀 **Gemini 3 Pro**: 4K 지원 & 식질 최강")
-        elif "2.5" in model:
-            st.info("⚡ **Gemini 2.5 Flash**: 빠른 속도")
-            
+            st.success("✨ **4K 옵션 활성화 가능**")
+        else:
+            st.warning("⚠️ 이 모델은 4K 설정을 무시할 수 있습니다.")
+
         st.divider()
-        resolution = st.selectbox("최대 너비(Width) 제한", RESOLUTIONS, index=0)
-        st.caption("📢 최고 화질을 위해 **'원본 유지'**를 권장합니다.")
-        
-        st.subheader("🎨 편집 옵션")
-        allow_bubble_mod = st.toggle("말풍선 확장/변형 허용", value=True, help="세로 말풍선을 가로 텍스트에 맞춰 강제로 늘립니다.")
-        use_upscale = st.toggle("✨ Gemini 3.0 리마스터링 (Upscale)", value=False, help="결과물을 다시 그려서 4K급으로 선명하게 복원합니다.")
+        st.subheader("⚙️ 공정 설정")
+        use_fix = st.toggle("가로쓰기 강제 교정 (Step 2)", value=True, help="번역 후 세로쓰기가 남아있으면 다시 고칩니다.")
+        use_upscale = st.toggle("4K 리마스터링 (Step 3)", value=True, help="Gemini 3 Pro의 '4K' 옵션을 켜서 초고화질로 다시 그립니다.")
         
         st.divider()
         use_slider = st.toggle("비교 슬라이더 사용", value=True)
-        prompt = st.text_area("시스템 프롬프트", value=DEFAULT_PROMPT, height=300)
         
-        return api_key, model, resolution, use_slider, prompt, allow_bubble_mod, use_upscale
+        return api_key, model, use_slider, use_fix, use_upscale
 
 def handle_file_upload():
     col1, col2 = st.columns([3, 1])
     with col1:
-        files = st.file_uploader(
-            "이미지 또는 ZIP 파일 추가", 
-            type=['png', 'jpg', 'jpeg', 'webp', 'zip'], 
-            accept_multiple_files=True, 
-            key=f"uploader_{st.session_state.uploader_key}"
-        )
+        files = st.file_uploader("이미지/ZIP 업로드", type=['png', 'jpg', 'webp', 'zip'], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
     with col2:
         st.write("클립보드:")
-        paste_btn = paste_image_button(
-            label="📋 붙여넣기", text_color="#ffffff", 
-            background_color="#FF4B4B", hover_background_color="#FF0000"
-        )
+        paste_btn = paste_image_button(label="📋 붙여넣기", text_color="#ffffff", background_color="#FF4B4B", hover_background_color="#FF0000")
 
     if files:
         new_cnt = 0
-        with st.spinner("파일 분석 중..."):
+        with st.spinner("파일 읽는 중..."):
             for f in files:
                 if f.name.lower().endswith('.zip'):
                     try:
@@ -287,25 +260,16 @@ def handle_file_upload():
                                 with z.open(fname) as img_f:
                                     img = Image.open(io.BytesIO(img_f.read()))
                                     img.load()
-                                    st.session_state.job_queue.append({
-                                        'id': str(uuid.uuid4()), 'name': os.path.basename(fname), 
-                                        'image': img, 'status': 'pending', 'error_msg': None
-                                    })
+                                    st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': os.path.basename(fname), 'image': img, 'status': 'pending', 'error_msg': None})
                                     new_cnt += 1
-                    except Exception as e:
-                        st.error(f"ZIP 오류 ({f.name}): {e}")
+                    except: pass
                 else:
                     try:
                         img = Image.open(f)
                         img.load()
-                        st.session_state.job_queue.append({
-                            'id': str(uuid.uuid4()), 'name': f.name, 
-                            'image': img, 'status': 'pending', 'error_msg': None
-                        })
+                        st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f.name, 'image': img, 'status': 'pending', 'error_msg': None})
                         new_cnt += 1
-                    except:
-                        st.toast(f"❌ {f.name} 파일 오류")
-            
+                    except: pass
             if new_cnt > 0:
                 time.sleep(0.5)
                 st.session_state.uploader_key += 1
@@ -314,43 +278,38 @@ def handle_file_upload():
     if paste_btn.image_data is not None:
         curr_hash = get_image_hash(paste_btn.image_data)
         if st.session_state.last_pasted_hash != curr_hash:
-            timestamp = int(time.time())
-            st.session_state.job_queue.append({
-                'id': str(uuid.uuid4()), 'name': f"clipboard_{timestamp}.png", 
-                'image': paste_btn.image_data, 'status': 'pending', 'error_msg': None
-            })
+            st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f"paste_{int(time.time())}.png", 'image': paste_btn.image_data, 'status': 'pending', 'error_msg': None})
             st.session_state.last_pasted_hash = curr_hash
             st.rerun()
 
-def render_queue(api_key, model, prompt, resolution, allow_bubble_mod, use_upscale):
+def render_queue(api_key, model, use_fix, use_upscale):
     if not st.session_state.job_queue:
-        st.info("대기열이 비어있습니다. 이미지를 업로드하거나 붙여넣으세요.")
+        st.info("대기열이 비어있습니다.")
         return
 
     st.divider()
     c1, c2, c3 = st.columns([3, 1, 1])
-    pending_count = len([i for i in st.session_state.job_queue if i['status'] == 'pending'])
-    c1.subheader(f"📂 대기열 ({len(st.session_state.job_queue)}장 / 대기 {pending_count}장)")
+    pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
+    c1.subheader(f"📂 대기열 ({len(st.session_state.job_queue)}장)")
     
     if not st.session_state.is_auto_running:
-        if c2.button(f"🚀 전체 실행", type="primary", use_container_width=True, disabled=pending_count==0):
-            if not api_key:
-                st.error("API 키를 먼저 입력하세요.")
+        if c2.button(f"🚀 전체 실행", type="primary", use_container_width=True, disabled=len(pending)==0):
+            if not api_key: st.error("API 키 필요")
             else:
                 st.session_state.is_auto_running = True
                 st.rerun()
     else:
-        if c2.button("⏹️ 실행 중지", type="secondary", use_container_width=True):
+        if c2.button("⏹️ 중지", type="secondary", use_container_width=True):
             st.session_state.is_auto_running = False
             st.rerun()
-            
+
     if c3.button("🗑️ 전체 삭제", use_container_width=True):
         st.session_state.job_queue = []
         st.session_state.is_auto_running = False
         st.rerun()
 
     if st.session_state.is_auto_running:
-        st.progress(100, text="🔄 자동 처리 중입니다... (파일을 추가해도 멈추지 않습니다)")
+        st.progress(100, text="🔄 자동 처리 중... (Step 1~3 진행 중)")
 
     with st.container():
         for i, item in enumerate(st.session_state.job_queue):
@@ -358,39 +317,31 @@ def render_queue(api_key, model, prompt, resolution, allow_bubble_mod, use_upsca
                 cols = st.columns([1, 3, 2])
                 cols[0].image(item['image'], use_container_width=True)
                 with cols[1]:
-                    if item['status'] == 'error':
-                        st.error(f"❌ {item['error_msg']}")
-                    elif item['status'] == 'pending':
-                        st.info("⏳ 대기 중")
-                    
+                    if item['status'] == 'error': st.error(f"❌ {item['error_msg']}")
+                    elif item['status'] == 'pending': st.info("⏳ 대기 중")
                 with cols[2]:
-                    if st.button("▶️ 개별 실행", key=f"run_one_{item['id']}", use_container_width=True):
-                         process_and_update(item, api_key, model, prompt, resolution, allow_bubble_mod, use_upscale)
-                    
-                    if st.button("🗑️ 삭제", key=f"del_q_{item['id']}", use_container_width=True):
+                    if st.button("▶️ 실행", key=f"run_{item['id']}", use_container_width=True):
+                        process_and_update(item, api_key, model, use_fix, use_upscale)
+                    if st.button("🗑️ 삭제", key=f"del_{item['id']}", use_container_width=True):
                         st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
                         st.rerun()
 
 def render_results(use_slider):
-    if not st.session_state.results:
-        return
+    if not st.session_state.results: return
 
     st.divider()
     c1, c2 = st.columns([4, 1])
-    c1.subheader(f"🖼️ 완료 목록 ({len(st.session_state.results)}장)")
-    
-    if c2.button("🗑️ 결과 비우기", use_container_width=True):
+    c1.subheader(f"🖼️ 완료 ({len(st.session_state.results)}장)")
+    if c2.button("🗑️ 비우기", use_container_width=True):
         st.session_state.results = []
         st.rerun()
 
     with st.container():
         sc1, sc2 = st.columns([3, 1])
-        folder_name = sc1.text_input("폴더명", value="나노바나나_결과물", label_visibility="collapsed", placeholder="저장할 폴더명 입력")
-        if sc2.button("💾 폴더에 저장", use_container_width=True):
-            save_to_local_folder(folder_name)
+        folder = sc1.text_input("폴더명", value="나노바나나_4K", label_visibility="collapsed")
+        if sc2.button("💾 저장", use_container_width=True): save_to_local_folder(folder)
 
     st.divider()
-    
     for i, item in enumerate(st.session_state.results):
         with st.expander(f"✅ #{i+1} : {item['name']}", expanded=True):
             cols = st.columns([3, 1])
@@ -398,101 +349,67 @@ def render_results(use_slider):
                 if use_slider:
                     orig = item['original']
                     res = item['result']
-                    if orig.size != res.size:
-                        orig = orig.resize(res.size)
-                    
-                    image_comparison(
-                        img1=orig, img2=res, 
-                        label1="Original", label2="Trans",
-                        in_memory=True
-                    )
+                    if orig.size != res.size: orig = orig.resize(res.size)
+                    image_comparison(img1=orig, img2=res, label1="Original", label2="4K Result", in_memory=True)
                 else:
                     st.image(item['result'], use_container_width=True)
-
             with cols[1]:
-                st.caption("작업 관리")
-                if st.button("🔄 다시 하기", key=f"retry_res_{item['id']}", help="현재 결과를 삭제하고 대기열로 되돌립니다.", use_container_width=True):
-                    st.session_state.job_queue.append({
-                        'id': str(uuid.uuid4()), 
-                        'name': item['name'], 
-                        'image': item['original'], 
-                        'status': 'pending', 
-                        'error_msg': None
-                    })
+                if st.button("🔄 재작업", key=f"re_{item['id']}", use_container_width=True):
+                    st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': item['name'], 'image': item['original'], 'status': 'pending', 'error_msg': None})
                     st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
-                    st.toast(f"♻️ '{item['name']}' 재작업을 위해 대기열로 이동!", icon="↩️")
-                    time.sleep(0.5)
                     st.rerun()
-
-                if st.button("🗑️ 삭제", key=f"del_res_{item['id']}", use_container_width=True):
+                if st.button("🗑️ 삭제", key=f"rm_{item['id']}", use_container_width=True):
                     st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
                     st.rerun()
                 
                 buf = io.BytesIO()
                 item['result'].save(buf, format="PNG")
-                st.download_button(
-                    label="⬇️ 다운로드",
-                    data=buf.getvalue(),
-                    file_name=f"translated_{item['name']}",
-                    mime="image/png",
-                    key=f"down_{item['id']}",
-                    use_container_width=True
-                )
+                st.download_button("⬇️ 다운로드", data=buf.getvalue(), file_name=f"4K_{item['name']}", mime="image/png", key=f"dl_{item['id']}", use_container_width=True)
 
-def auto_process_step(api_key, model, prompt, resolution, allow_bubble_mod, use_upscale):
-    if not st.session_state.is_auto_running:
-        return
-
-    pending_items = [i for i in st.session_state.job_queue if i['status'] == 'pending']
+def auto_process_step(api_key, model, use_fix, use_upscale):
+    if not st.session_state.is_auto_running: return
+    pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
     
-    if not pending_items:
+    if not pending:
         st.session_state.is_auto_running = False
-        st.toast("✅ 모든 작업이 완료되었습니다!")
+        st.toast("✅ 작업 완료!")
         time.sleep(1)
         st.rerun()
         return
 
-    item = pending_items[0]
+    item = pending[0]
     
-    msg = "✨ Gemini 3 Pro 리마스터링 중..." if use_upscale else "작업 중..."
-    with st.spinner(f"자동 처리 중... {item['name']} ({msg})"):
-        res_img, err = process_single_image(api_key, model, item['image'], prompt, resolution, allow_bubble_mod, use_upscale)
+    steps_msg = "번역"
+    if use_fix: steps_msg += "→교정"
+    if use_upscale: steps_msg += "→4K"
+
+    with st.spinner(f"자동 처리 중... {item['name']} ({steps_msg})"):
+        res_img, err = run_pipeline(api_key, model, item['image'], use_fix, use_upscale)
         
         if res_img:
-            st.session_state.results.append({
-                'id': str(uuid.uuid4()), 'name': item['name'], 
-                'original': item['image'], 'result': res_img
-            })
+            st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
         else:
             item['status'] = 'error'
             item['error_msg'] = err
     
-    time.sleep(0.5)
+    time.sleep(1) # 쿨타임
     st.rerun()
 
 # --- [5. 메인 실행] ---
 def main():
     init_session_state()
-    api_key, model, resolution, use_slider, prompt, allow_bubble_mod, use_upscale = render_sidebar()
+    api_key, model, use_slider, use_fix, use_upscale = render_sidebar()
     
-    st.session_state['allow_mod'] = allow_bubble_mod
-    st.session_state['use_upscale'] = use_upscale
-
-    st.title("🍌 Nano Banana 3.0")
-    st.markdown("""
-    **Ultimate Manga Typesetter powered by Gemini 3 Pro**
-    - **Gemini 3 Pro (Nano Banana Pro)**: 4K Resolution & Superior Typesetting
-    - **Ultra Upscaling**: Re-render lines with vector-like quality
-    """)
+    st.title("🍌 Nano Banana 4K")
+    st.markdown("**Real 4K Resolution** powered by `google-genai` SDK & Gemini 3 Pro")
     
     handle_file_upload()
-    render_queue(api_key, model, prompt, resolution, allow_bubble_mod, use_upscale)
+    render_queue(api_key, model, use_fix, use_upscale)
     render_results(use_slider)
 
     if st.session_state.is_auto_running:
-        auto_process_step(api_key, model, prompt, resolution, allow_bubble_mod, use_upscale)
+        auto_process_step(api_key, model, use_fix, use_upscale)
 
 if __name__ == "__main__":
     main()
-
