@@ -13,7 +13,11 @@ from streamlit_paste_button import paste_image_button
 from streamlit_image_comparison import image_comparison
 
 # --- [1. 기본 설정 및 상수] ---
-DEFAULT_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
+# secrets 파일이 없으면 빈 값으로 시작 (에러 방지)
+try:
+    DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
+except:
+    DEFAULT_API_KEY = ""
 
 # ✅ 2025 최신 모델 리스트 (사용자 요청 반영)
 MODELS = [
@@ -103,16 +107,11 @@ def save_to_local_folder(folder_name):
 # --- [3. AI 처리 로직 (Core)] ---
 
 def get_generation_config():
-    """
-    ✅ [최고 화질 설정]
-    - output_tokens: 최대치로 설정하여 고해상도 생성 유도
-    - mime_type: 모델이 텍스트가 아닌 이미지를 반환하도록 강제
-    """
     return genai.types.GenerationConfig(
         candidate_count=1,
-        max_output_tokens=32768, 
-        temperature=0.2,
-        response_mime_type="image/jpeg" # 이미지 반환 강제
+        max_output_tokens=8192, # 토큰 수는 8192 정도면 충분합니다 (안전하게 변경)
+        temperature=0.2
+        # response_mime_type 라인 삭제함
     )
 
 def upscale_with_gemini(api_key: str, image: Image.Image) -> Image.Image:
@@ -496,3 +495,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
