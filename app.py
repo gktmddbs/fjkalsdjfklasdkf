@@ -19,39 +19,40 @@ try:
 except:
     DEFAULT_API_KEY = ""
 
-# 모델 리스트 (3 Pro가 4K 지원 핵심)
+# 모델 리스트
 MODELS = [
-    "gemini-3-pro-image-preview",  # 👑 4K 지원 & 지능 최강
-    "gemini-2.0-flash-exp",        # ⚡ 빠름 (4K 미지원, 2K 수준)
+    "gemini-3-pro-image-preview",  # 👑 4K 지원
+    "gemini-2.0-flash-exp",        # ⚡ 빠름
 ]
 
-# --- [2. 원샷 프롬프트 (강력함)] ---
-# 번역 + 식질 + 4K 변환을 한 번에 시키는 프롬프트입니다.
+# --- [2. 원샷 프롬프트] ---
 DEFAULT_PROMPT = """
 # Role
-당신은 세계 최고의 만화 번역가이자 편집자입니다.
+당신은 세계 최고의 만화 번역가이자 편집자이다. 당신은 완벽 주의자 여서 실수를 하면 심장마비로 사망한다.
 
 # Task
-제공된 만화 이미지를 **한국어**로 번역하고 식질하여 **4K 초고해상도**로 출력하세요.
+제공된 만화 이미지를 **한국어**로 번역하고 식질하여 **4K 초고해상도**로 출력해라
 
 # Critical Rules (반드시 준수)
 1. **번역 (Translation):**
-   - 일본어/영어를 문맥에 맞는 자연스러운 **한국어(웹툰체)**로 번역하세요.
-   - 캐릭터의 표정(화남, 부끄러움 등)에 맞춰 어조를 조절하세요.
+   - 일본어/영어를 문맥에 맞는 자연스러운 **한국어**로 번역해라.
+   - 캐릭터의 표정(화남, 부끄러움 등)과 캐릭터의 성격에 맞춰 어조를 조절해라.
 
-2. **레이아웃 (Layout):**
-   - 🚫 **세로쓰기 절대 금지:** 모든 텍스트는 반드시 **왼쪽에서 오른쪽(가로)**으로 쓰세요.
-   - ✅ **말풍선 확장:** 가로로 쓸 공간이 좁다면, **말풍선 배경을 하얗게 덧칠해서 옆으로 넓히세요.** 글자를 찌그러뜨리지 마세요.
+2. **레이아웃 (Layout):
+별*9999999:가로쓰기를 해라 (안하면 사망)
 
 3. **화질 (Quality):**
-   - 원본의 노이즈를 제거하고 선을 선명하게 다듬으세요 (Digital Scan Quality).
-   - 배경(스크린톤)을 완벽하게 복원하세요.
+   - 원본의 노이즈를 제거하고 선을 선명하게 다듬어라 (Digital Scan Quality).
+   - 배경(스크린톤)을 완벽하게 복원해라
+
+4. 그림을 절대로 회손하지 말고 무엇도 추가하지 마라
+
 
 # Output
-설명 없이, 작업이 완료된 **이미지 파일**만 출력하세요.
+설명 없이, 작업이 완료된 **이미지 파일**만 출력해라.
 """
 
-# --- [3. 유틸리티] ---
+# --- [3. 유틸리티 & 팝업 함수] ---
 def init_session_state():
     defaults = {
         'job_queue': [],
@@ -93,62 +94,46 @@ def save_to_local_folder(folder_name):
     except Exception as e:
         st.error(f"저장 실패: {e}")
 
+# ✅ [추가됨] 이미지 전체화면 보기 (모달 팝업)
+@st.dialog("📷 이미지 전체 화면", width="large")
+def show_full_image(image, caption):
+    st.image(image, caption=caption, use_container_width=True)
+
 # --- [4. AI 생성 로직 (One-Shot)] ---
 def generate_one_shot(api_key, model_name, prompt, image_input):
-    """
-    한 번의 호출로 번역+식질+4K출력을 끝냅니다.
-    """
     try:
         client = genai.Client(api_key=api_key)
         image_bytes = image_to_bytes(image_input)
         
-        # 설정 준비
-        config_params = {
-            "response_modalities": ["IMAGE"],
-        }
+        config_params = {"response_modalities": ["IMAGE"]}
 
-        # 👑 Gemini 3 Pro일 때만 '4K' 옵션 강제 주입
+        # 4K 옵션
         if "gemini-3" in model_name:
-            config_params["image_config"] = types.ImageConfig(
-                image_size="4K"  # <--- 핵심: 여기서 4K로 뻥튀기됨
-            )
+            config_params["image_config"] = types.ImageConfig(image_size="4K")
 
-        # API 호출
         response = client.models.generate_content(
             model=model_name,
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-            ],
+            contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type="image/png")],
             config=types.GenerateContentConfig(**config_params)
         )
         
-        # 결과 이미지 추출
         if response.parts:
             for part in response.parts:
-                if part.inline_data:
-                    return Image.open(io.BytesIO(part.inline_data.data)), None
-                if hasattr(part, 'image') and part.image:
-                     return part.image, None
+                if part.inline_data: return Image.open(io.BytesIO(part.inline_data.data)), None
+                if hasattr(part, 'image') and part.image: return part.image, None
         
-        if hasattr(response, 'image') and response.image:
-             return response.image, None
+        if hasattr(response, 'image') and response.image: return response.image, None
 
-        return None, "이미지 생성 실패 (AI가 거부함)"
-
+        return None, "이미지 생성 실패"
     except Exception as e:
         return None, f"API 에러: {str(e)}"
 
 def process_and_update(item, api_key, model, prompt):
-    """작업 실행기"""
-    with st.spinner(f"✨ 4K 번역/식질 중... ({item['name']})"):
+    with st.spinner(f"✨ 4K 식질 중... ({item['name']})"):
         res_img, err = generate_one_shot(api_key, model, prompt, item['image'])
         
         if res_img:
-            st.session_state.results.append({
-                'id': str(uuid.uuid4()), 'name': item['name'], 
-                'original': item['image'], 'result': res_img
-            })
+            st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
             st.rerun()
         else:
@@ -160,23 +145,18 @@ def process_and_update(item, api_key, model, prompt):
 def render_sidebar():
     with st.sidebar:
         st.title("🍌 Nano Banana")
-        st.caption("One-Shot 4K Translation")
-        
+        st.caption("One-Shot 4K + New UI")
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
         model = st.selectbox("모델 선택", MODELS, index=0)
         
         if "gemini-3" in model:
-            st.success("✅ **4K 고화질 모드 활성화**")
-        else:
-            st.info("⚡ 빠른 모드 (2K 화질)")
-
+            st.success("✅ **4K 모드 활성화**")
+        
         st.divider()
         use_slider = st.toggle("비교 슬라이더 보기", value=True)
         
-        st.divider()
-        with st.expander("📝 프롬프트 수정 (한국어)", expanded=False):
+        with st.expander("📝 프롬프트 수정", expanded=False):
             prompt = st.text_area("AI 지시사항", value=DEFAULT_PROMPT, height=350)
-        
         return api_key, model, use_slider, prompt
 
 def handle_file_upload():
@@ -248,22 +228,33 @@ def render_queue(api_key, model, prompt):
         st.rerun()
 
     if st.session_state.is_auto_running:
-        st.progress(100, text="🔄 자동 처리 중... (One-Shot 4K)")
+        st.progress(100, text="🔄 자동 처리 중...")
 
-    with st.container():
-        for i, item in enumerate(st.session_state.job_queue):
-            with st.expander(f"#{i+1} : {item['name']}", expanded=False):
-                cols = st.columns([1, 3, 2])
-                cols[0].image(item['image'], use_container_width=True)
-                with cols[1]:
-                    if item['status'] == 'error': st.error(f"❌ {item['error_msg']}")
-                    elif item['status'] == 'pending': st.info("⏳ 대기 중")
-                with cols[2]:
-                    if st.button("▶️ 실행", key=f"run_{item['id']}", use_container_width=True):
-                        process_and_update(item, api_key, model, prompt)
-                    if st.button("🗑️ 삭제", key=f"del_{item['id']}", use_container_width=True):
-                        st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
-                        st.rerun()
+    # ✅ [변경됨] 리스트 레이아웃 (박스 형태)
+    for item in st.session_state.job_queue:
+        with st.container(border=True): # 테두리 박스
+            # [이미지 1] : [정보 4] 비율
+            col_img, col_info = st.columns([1, 4])
+            
+            with col_img:
+                # use_container_width=True: 자동 높이 조절
+                st.image(item['image'], use_container_width=True)
+                # 확대 버튼
+                if st.button("🔍 확대", key=f"zoom_q_{item['id']}", use_container_width=True):
+                    show_full_image(item['image'], item['name'])
+
+            with col_info:
+                st.markdown(f"**📄 {item['name']}**")
+                if item['status'] == 'error': st.error(f"❌ {item['error_msg']}")
+                elif item['status'] == 'pending': st.info("⏳ 대기 중")
+                
+                # 버튼 배치
+                b1, b2, b3 = st.columns([1, 1, 3])
+                if b1.button("▶️ 실행", key=f"run_{item['id']}"):
+                    process_and_update(item, api_key, model, prompt)
+                if b2.button("🗑️ 삭제", key=f"del_{item['id']}"):
+                    st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
+                    st.rerun()
 
 def render_results(use_slider):
     if not st.session_state.results: return
@@ -281,29 +272,41 @@ def render_results(use_slider):
         if sc2.button("💾 저장", use_container_width=True): save_to_local_folder(folder)
 
     st.divider()
-    for i, item in enumerate(st.session_state.results):
-        with st.expander(f"✅ #{i+1} : {item['name']}", expanded=True):
-            cols = st.columns([3, 1])
-            with cols[0]:
+    
+    # ✅ [변경됨] 결과물 리스트 레이아웃
+    for item in st.session_state.results:
+        with st.container(border=True):
+            # [이미지 1] : [정보 3] 비율
+            col_img, col_info = st.columns([1, 3])
+            
+            with col_img:
+                st.image(item['result'], use_container_width=True)
+                if st.button("🔍 확대", key=f"zoom_r_{item['id']}", use_container_width=True):
+                    show_full_image(item['result'], f"결과: {item['name']}")
+
+            with col_info:
+                st.markdown(f"### ✅ {item['name']}")
+                
                 if use_slider:
-                    orig = item['original']
-                    res = item['result']
-                    if orig.size != res.size: orig = orig.resize(res.size)
-                    image_comparison(img1=orig, img2=res, label1="Original", label2="Trans", in_memory=True)
-                else:
-                    st.image(item['result'], use_container_width=True)
-            with cols[1]:
-                if st.button("🔄 재작업", key=f"re_{item['id']}", use_container_width=True):
+                    with st.expander("🆚 비교 보기", expanded=False):
+                        orig = item['original']
+                        res = item['result']
+                        if orig.size != res.size: orig = orig.resize(res.size)
+                        image_comparison(img1=orig, img2=res, label1="Original", label2="Trans", in_memory=True)
+
+                # 버튼 그룹
+                cols = st.columns(3)
+                if cols[0].button("🔄 재작업", key=f"re_{item['id']}", use_container_width=True):
                     st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': item['name'], 'image': item['original'], 'status': 'pending', 'error_msg': None})
                     st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
                     st.rerun()
-                if st.button("🗑️ 삭제", key=f"rm_{item['id']}", use_container_width=True):
+                if cols[1].button("🗑️ 삭제", key=f"rm_{item['id']}", use_container_width=True):
                     st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
                     st.rerun()
                 
                 buf = io.BytesIO()
                 item['result'].save(buf, format="PNG")
-                st.download_button("⬇️ 다운로드", data=buf.getvalue(), file_name=f"kor_{item['name']}", mime="image/png", key=f"dl_{item['id']}", use_container_width=True)
+                cols[2].download_button("⬇️ 다운", data=buf.getvalue(), file_name=f"kor_{item['name']}", mime="image/png", key=f"dl_{item['id']}", use_container_width=True)
 
 def auto_process_step(api_key, model, prompt):
     if not st.session_state.is_auto_running: return
@@ -317,10 +320,8 @@ def auto_process_step(api_key, model, prompt):
         return
 
     item = pending[0]
-    
     with st.spinner(f"자동 처리 중... {item['name']}"):
         res_img, err = generate_one_shot(api_key, model, prompt, item['image'])
-        
         if res_img:
             st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
@@ -337,7 +338,7 @@ def main():
     api_key, model, use_slider, prompt = render_sidebar()
     
     st.title("🍌 Nano Banana One-Shot")
-    st.markdown("**한 방에 끝내는 4K 식질** (Powered by Gemini 3 Pro)")
+    st.markdown("**4K One-Shot** with Updated UI")
     
     handle_file_upload()
     render_queue(api_key, model, prompt)
