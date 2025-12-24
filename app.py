@@ -61,16 +61,22 @@ You are a QA Supervisor for Korean Webtoon Localization.
 # Task
 Inspect the [Generated Image] for CRITICAL FAILURES based on the [Original Image].
 
-# PASS/FAIL CRITERIA
-1. **Vertical Text (FATAL):** Is ANY Korean text written vertically? -> FAIL immediately.
-2. **Text Overflow:** Is text touching the borders? -> FAIL.
-3. **Language:** Is there untranslated Japanese? -> FAIL.
-4. **Distortion:** Is the face/art melted or blurry? -> FAIL.
+# PASS/FAIL CRITERIA (Strict but Nuanced)
+
+1. **Vertical Text Policy (Conditional):**
+   - **FAIL (Reject):** If you see **Multi-column Vertical Dialogue** (Traditional Japanese style where text is read Right-to-Left in vertical columns). This breaks Webtoon readability.
+   - **PASS (Accept):** If the vertical text is **Sound Effects (SFX)** (e.g., "쾅", "콰아앙").
+   - **PASS (Accept):** If it is a **Single Vertical Line** (e.g., a shout, a sign, or a short exclamation like "?!").
+   - **Summary:** Only reject "Block-paragraph vertical text". Stylistic vertical text is allowed.
+
+2. **Text Overflow:** Is text touching the speech bubble borders or cut off? -> FAIL.
+3. **Language:** Is there untranslated Japanese text remaining? -> FAIL.
+4. **Distortion:** Is the main character's face melted, blurry, or scary? -> FAIL.
 
 # Output Format (JSON ONLY)
-Return a single JSON object.
+Return a single JSON object. Do not explain textually.
 If PASS: {"status": "PASS"}
-If FAIL: {"status": "FAIL", "reason": "Vertical text detected in top-right bubble"}
+If FAIL: {"status": "FAIL", "reason": "Multi-column vertical dialogue detected"}
 """
 
 # --- [3. 유틸리티 (클라우드 안전 버전)] ---
@@ -583,3 +589,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
