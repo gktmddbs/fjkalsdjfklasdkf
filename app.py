@@ -24,11 +24,9 @@ except:
 MODEL_WORKER = "gemini-3-pro-image-preview"  # 작업자 (고화질)
 MODEL_INSPECTOR = "gemini-3-flash-preview"     # 감독관 (빠름/검수용)
 
-DEFAULT_EX_IN_PATH = "example_in.png"
-DEFAULT_EX_OUT_PATH = "example_out.png"
 MEMORY_FILE = "banana_memory.pkl"
 
-# 작업자 프롬프트
+# 작업자 프롬프트 (한국어 버전)
 DEFAULT_PROMPT = """
 # Role
 당신은 세계 최고의 "만화 전문 번역 및 식자(Typesetter) AI"입니다. 원본 이미지의 예술적 가치를 완벽하게 보존하면서, 일본어 텍스트를 자연스러운 [한국어]로 변환하여 프로덕션 레벨의 결과물을 완성하십시오.
@@ -40,7 +38,6 @@ DEFAULT_PROMPT = """
 # 2. 시각적 제약 및 원본 보존 (Pixel-Perfect Integrity)
 - **[절대 원칙] 원본 훼손 금지:** 텍스트가 있는 말풍선 영역을 제외한 캐릭터, 배경, 펜 선, 스크린톤 등은 **단 1픽셀도 변형하거나 왜곡하지 마십시오.** 원본 그림을 그대로 유지해야 합니다.
 - **부분 수정(Inpainting):** 원본 일본어 텍스트만 깨끗이 지우고, 글자 뒤에 가려져 있던 배경(효과선, 배경 패턴 등)을 자연스럽게 복원하십시오.
-- **해상도:** 최종 결과물은 4K 수준의 **초고해상도(High-Resolution)**로 업스케일링하여 출력하십시오.
 
 # 3. 타이포그래피 및 식자 가이드
 - **쓰기 방향 (Horizontal):** 읽는 방향과 달리, 번역된 한국어 텍스트는 반드시 **가로쓰기(왼쪽→오른쪽)**로 입력하십시오. **세로쓰기는 절대 금지**입니다.
@@ -59,7 +56,7 @@ DEFAULT_PROMPT = """
 설명이나 사족 없이, 처리가 완료된 **이미지 파일만** 반환하십시오.
 """
 
-# ✅ [NEW] 감독관 프롬프트
+# 감독관 프롬프트
 INSPECTOR_PROMPT = """
 # Role
 You are a QA Supervisor for Korean Manga Localization.
@@ -131,19 +128,6 @@ def create_zip_file():
             zip_file.writestr(filename, img_bytes.getvalue())
     return zip_buffer.getvalue()
 
-def save_to_local_folder(folder_name):
-    if not folder_name: return
-    try:
-        os.makedirs(folder_name, exist_ok=True)
-        count = 0
-        for item in st.session_state.results:
-            safe_name = f"kor_{item['name']}"
-            if not safe_name.lower().endswith('.png'): safe_name = os.path.splitext(safe_name)[0] + ".png"
-            item['result'].save(os.path.join(folder_name, safe_name), format="PNG")
-            count += 1
-        st.success(f"✅ 저장 완료: {count}장")
-    except Exception as e: st.error(f"저장 실패: {e}")
-
 @st.dialog("📷 이미지 전체 화면", width="large")
 def show_full_image(image, caption):
     st.image(image, caption=caption, use_container_width=True)
@@ -155,7 +139,6 @@ def verify_image(api_key, original_img, generated_img):
     try:
         client = genai.Client(api_key=api_key)
         
-        # 원본과 결과물을 비교하게 함
         contents = [
             INSPECTOR_PROMPT,
             "Here is the ORIGINAL image:",
@@ -167,7 +150,7 @@ def verify_image(api_key, original_img, generated_img):
         response = client.models.generate_content(
             model=MODEL_INSPECTOR,
             contents=contents,
-            config=types.GenerateContentConfig(temperature=0.5) # 냉철한 판단
+            config=types.GenerateContentConfig(temperature=0.5)
         )
         
         if response.text:
@@ -175,55 +158,43 @@ def verify_image(api_key, original_img, generated_img):
             if "PASS" in result:
                 return True, "PASS"
             else:
-                return False, result # 실패 사유 반환
-        return True, "Unknown Response (Passed)" # 애매하면 통과
+                return False, result 
+        return True, "Unknown Response (Passed)"
         
     except Exception as e:
-        print(f"검수 오류: {e}")
-        return True, "Inspector Error (Skipped)" # 검수기 고장나면 그냥 통과
+        return True, "Inspector Error (Skipped)"
 
-def generate_with_auto_fix(api_key, prompt, image_input, ex_in, ex_out, max_retries=2):
+def generate_with_auto_fix(api_key, prompt, image_input, resolution, temperature, max_retries=2, status_container=None):
     """
     생성(Worker) -> 검수(Inspector) -> (실패시) 재생성 루프
-    Safety Settings를 추가하여 차단율을 낮추고, 검수 피드백을 반영합니다.
+    status_container: st.status 객체 (UI 업데이트용)
     """
     client = genai.Client(api_key=api_key)
     target_bytes = image_to_bytes(image_input)
     
     last_error = ""
+    image_config_val = resolution 
 
     for attempt in range(max_retries + 1):
         try:
+            # UI 상태 업데이트
+            if status_container:
+                msg = f"🎨 **시도 {attempt+1}/{max_retries+1}**: 이미지 생성 중..." if attempt < max_retries else f"🎨 **마지막 시도**: 이미지 생성 중..."
+                status_container.write(msg)
+            
             # 1. 콘텐츠 구성
             contents = [prompt]
-            
-            # 예시 데이터가 있으면 추가 (퓨샷 학습)
-            if ex_in and ex_out:
-                ex_in_b = image_to_bytes(ex_in)
-                ex_out_b = image_to_bytes(ex_out)
-                contents.extend([
-                    "Example Input Image (Reference):", 
-                    types.Part.from_bytes(data=ex_in_b, mime_type="image/png"),
-                    "Example Output Image (Target Style):", 
-                    types.Part.from_bytes(data=ex_out_b, mime_type="image/png")
-                ])
-            
-            # 이전 시도에서 검수 실패 시 피드백 추가
             if attempt > 0 and last_error:
                 contents.append(f"⚠️ PREVIOUS ATTEMPT FAILED: {last_error}")
                 contents.append("Please fix the issues mentioned above and try again.")
-
-            # 대상 이미지 추가
             contents.append("Now, process this image:")
             contents.append(types.Part.from_bytes(data=target_bytes, mime_type="image/png"))
 
-            # 2. API 설정 (4K 출력 + 안전 설정 해제)
+            # 2. API 설정
             config_params = {
                 "response_modalities": ["IMAGE"],
-                "image_config": types.ImageConfig(image_size="4K")
+                "image_config": types.ImageConfig(image_size=image_config_val)
             }
-            
-            # 만화의 액션/표현이 차단되지 않도록 모든 카테고리 해제
             safety_settings = [
                 types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
                 types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
@@ -236,7 +207,7 @@ def generate_with_auto_fix(api_key, prompt, image_input, ex_in, ex_out, max_retr
                 model=MODEL_WORKER,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    temperature=0.2, # 약간의 유연성을 위해 0.2 설정
+                    temperature=temperature,
                     safety_settings=safety_settings,
                     **config_params
                 )
@@ -253,42 +224,64 @@ def generate_with_auto_fix(api_key, prompt, image_input, ex_in, ex_out, max_retr
                 result_img = response.image
 
             if not result_img:
+                if status_container: status_container.write("❌ 이미지 생성 실패 (빈 결과)")
                 return None, "이미지 생성 결과가 비어있습니다. (Safety Filter 가능성)"
 
-            # 4. 검수 (Inspector) - 마지막 시도가 아닐 때만 실행
+            # 4. 검수 (Inspector)
             if attempt < max_retries:
+                if status_container: status_container.write(f"🧐 **시도 {attempt+1}**: 결과물 검수 중...")
+                
                 is_pass, reason = verify_image(api_key, image_input, result_img)
                 if is_pass:
-                    return result_img, None # 통과 시 즉시 반환
+                    if status_container: status_container.write("✅ 검수 통과!")
+                    return result_img, None 
                 else:
                     last_error = reason
-                    st.toast(f"🚨 검수 불합격 ({attempt+1}/{max_retries}): {reason}")
-                    time.sleep(1.5) # API 할당량 제한을 고려한 짧은 대기
+                    if status_container: status_container.write(f"🚨 **검수 불합격**: {reason} -> 재시도합니다.")
+                    time.sleep(1.0)
                     continue
             else:
-                # 마지막 시도라면 검수 결과와 상관없이 출력
+                if status_container: status_container.write("⚠️ 최대 재시도 횟수 도달. 현재 결과를 반환합니다.")
                 return result_img, "최종 시도 완료 (검수 미통과 포함)"
 
         except Exception as e:
-            # API 에러 발생 시 재시도하지 않고 에러 반환 (Key 문제 등)
+            if status_container: status_container.write(f"🔥 에러 발생: {str(e)}")
             return None, f"API 에러 발생: {str(e)}"
             
     return None, "재시도 횟수를 초과했습니다."
 
-def process_and_update(item, api_key, prompt, ex_in, ex_out, use_autofix):
-    with st.spinner(f"✨ 작업 중... ({item['name']})"):
+def process_and_update(item, api_key, prompt, resolution, temperature, use_autofix):
+    """단일 실행 처리 (Status UI 포함)"""
+    start_time = time.time()
+    
+    # st.status를 사용하여 진행 상태를 시각적으로 표시
+    with st.status(f"🚀 **{item['name']}** 작업 시작...", expanded=True) as status:
         if use_autofix:
-            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out)
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], resolution, temperature, status_container=status)
         else:
-            # 검수 없이 1회 실행
-            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out, max_retries=0)
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], resolution, temperature, max_retries=0, status_container=status)
+
+        end_time = time.time()
+        duration = end_time - start_time
 
         if res_img:
-            st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
+            # 성공 시 상태 업데이트
+            status.update(label=f"✅ 작업 완료! ({duration:.2f}초 소요)", state="complete", expanded=False)
+            
+            st.session_state.results.append({
+                'id': str(uuid.uuid4()), 
+                'name': item['name'], 
+                'original': item['image'], 
+                'result': res_img,
+                'duration': duration  # 소요 시간 저장
+            })
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
             save_session_to_disk()
+            time.sleep(1) # 사용자가 완료 메시지를 볼 수 있게 잠시 대기
             st.rerun()
         else:
+            # 실패 시
+            status.update(label="❌ 작업 실패", state="error", expanded=True)
             item['status'] = 'error'
             item['error_msg'] = err
             save_session_to_disk()
@@ -301,34 +294,40 @@ def render_sidebar():
         st.caption("Auto-Fix Edition")
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
         
-        # 모델 선택은 제거 (자동으로 3 Pro + 2 Flash 조합 사용)
         st.info(f"🛠️ 작업자: {MODEL_WORKER}\n👮 감독관: {MODEL_INSPECTOR}")
+
+        st.divider()
+        st.subheader("⚙️ 모델 설정")
+        
+        resolution = st.radio(
+            "해상도 (Resolution)", 
+            options=["4K", "2K", "1K"], 
+            index=0, 
+            horizontal=True,
+            help="높을수록 선명하지만 처리 시간이 길어질 수 있습니다."
+        )
+
+        temperature = st.slider(
+            "창의성 (Temperature)", 
+            min_value=0.0, 
+            max_value=1.0, 
+            value=0.2, 
+            step=0.1,
+            help="낮을수록(0.2) 지시를 엄격히 따르고, 높을수록(0.8) 창의적입니다."
+        )
 
         st.divider()
         st.subheader("⚙️ 옵션")
         use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=True, help="결과물이 이상하면 자동으로 다시 시도합니다. (시간 더 걸림)")
         
         if st.button("🗑️ 초기화", use_container_width=True): clear_all_data()
-
-        st.divider()
-        st.subheader("📚 예시 학습")
-        ex_in_file = st.file_uploader("예시 원본", type=['png', 'jpg'])
-        ex_out_file = st.file_uploader("예시 완성본", type=['png', 'jpg'])
-        
-        ex_in, ex_out = None, None
-        if ex_in_file: ex_in = Image.open(ex_in_file)
-        elif os.path.exists(DEFAULT_EX_IN_PATH): ex_in = Image.open(DEFAULT_EX_IN_PATH)
-        if ex_out_file: ex_out = Image.open(ex_out_file)
-        elif os.path.exists(DEFAULT_EX_OUT_PATH): ex_out = Image.open(DEFAULT_EX_OUT_PATH)
-
-        if ex_in and ex_out: st.success("✅ 예시 적용됨")
         
         st.divider()
         use_slider = st.toggle("비교 슬라이더", value=True)
         with st.expander("📝 프롬프트 수정"):
             prompt = st.text_area("작업 지시사항", value=DEFAULT_PROMPT, height=300)
             
-        return api_key, use_slider, prompt, ex_in, ex_out, use_autofix
+        return api_key, use_slider, prompt, resolution, temperature, use_autofix
 
 def handle_file_upload():
     col1, col2 = st.columns([3, 1])
@@ -369,7 +368,7 @@ def handle_file_upload():
             save_session_to_disk()
             st.rerun()
 
-def render_queue(api_key, prompt, ex_in, ex_out, use_autofix):
+def render_queue(api_key, prompt, resolution, temperature, use_autofix):
     if not st.session_state.job_queue: return
 
     st.divider()
@@ -405,7 +404,7 @@ def render_queue(api_key, prompt, ex_in, ex_out, use_autofix):
                 elif item['status'] == 'pending': st.info("⏳ 대기 중")
                 
                 b1, b2, b3 = st.columns([1, 1, 3])
-                if b1.button("▶️ 실행", key=f"run_{item['id']}"): process_and_update(item, api_key, prompt, ex_in, ex_out, use_autofix)
+                if b1.button("▶️ 실행", key=f"run_{item['id']}"): process_and_update(item, api_key, prompt, resolution, temperature, use_autofix)
                 if b2.button("🗑️ 삭제", key=f"del_{item['id']}"):
                     st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
                     save_session_to_disk()
@@ -435,7 +434,10 @@ def render_results(use_slider):
                 st.image(item['result'], use_container_width=True)
                 if st.button("🔍 확대", key=f"zoom_r_{item['id']}"): show_full_image(item['result'], item['name'])
             with col_info:
-                st.markdown(f"### ✅ {item['name']}")
+                # 소요 시간 표시 추가
+                duration_txt = f"⏱️ {item['duration']:.2f}초" if 'duration' in item else ""
+                st.markdown(f"### ✅ {item['name']} {duration_txt}")
+                
                 if use_slider:
                     with st.expander("🆚 비교 보기"):
                         orig, res = item['original'], item['result']
@@ -457,29 +459,43 @@ def render_results(use_slider):
                 item['result'].save(buf, format="PNG")
                 cols[2].download_button("⬇️ 다운", data=buf.getvalue(), file_name=f"kor_{item['name']}", mime="image/png", key=f"dl_{item['id']}")
 
-def auto_process_step(api_key, prompt, ex_in, ex_out, use_autofix):
+def auto_process_step(api_key, prompt, resolution, temperature, use_autofix):
     if not st.session_state.is_auto_running: return
     pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
     
     if not pending:
         st.session_state.is_auto_running = False
-        st.toast("✅ 작업 완료!")
+        st.toast("✅ 모든 작업 완료!")
         time.sleep(1)
         st.rerun()
         return
 
     item = pending[0]
-    with st.spinner(f"자동 처리 중... {item['name']}"):
+    start_time = time.time()
+    
+    # 자동 실행 시에도 status 표시
+    with st.status(f"🔄 자동 처리 중... [{item['name']}]", expanded=True) as status:
         if use_autofix:
-            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out)
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], resolution, temperature, status_container=status)
         else:
-            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out, max_retries=0)
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], resolution, temperature, max_retries=0, status_container=status)
+
+        end_time = time.time()
+        duration = end_time - start_time
 
         if res_img:
-            st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
+            status.update(label=f"✅ 완료! ({duration:.2f}초)", state="complete", expanded=False)
+            st.session_state.results.append({
+                'id': str(uuid.uuid4()), 
+                'name': item['name'], 
+                'original': item['image'], 
+                'result': res_img,
+                'duration': duration
+            })
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
             save_session_to_disk()
         else:
+            status.update(label="❌ 실패", state="error")
             item['status'] = 'error'
             item['error_msg'] = err
             save_session_to_disk()
@@ -490,19 +506,17 @@ def auto_process_step(api_key, prompt, ex_in, ex_out, use_autofix):
 # --- [6. 메인 실행] ---
 def main():
     init_session_state()
-    api_key, use_slider, prompt, ex_in, ex_out, use_autofix = render_sidebar()
+    api_key, use_slider, prompt, resolution, temperature, use_autofix = render_sidebar()
     
     st.title("🍌 Nano Banana")
     st.markdown("**Auto-Fix Edition** (with Supervisor AI)")
     
     handle_file_upload()
-    render_queue(api_key, prompt, ex_in, ex_out, use_autofix)
+    render_queue(api_key, prompt, resolution, temperature, use_autofix)
     render_results(use_slider)
 
     if st.session_state.is_auto_running:
-        auto_process_step(api_key, prompt, ex_in, ex_out, use_autofix)
+        auto_process_step(api_key, prompt, resolution, temperature, use_autofix)
 
 if __name__ == "__main__":
     main()
-
-
