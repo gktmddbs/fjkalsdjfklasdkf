@@ -8,10 +8,13 @@ import time
 import uuid
 import hashlib
 import zipfile
-import tempfile # 시스템 임시 폴더 사용
+import tempfile
+import json
+from streamlit_paste_button import paste_image_button
+from streamlit_image_comparison import image_comparison
 
 # --- [1. 기본 설정 및 디렉토리 관리] ---
-st.set_page_config(page_title="Nano Banana (Cloud)", page_icon="🍌", layout="wide")
+st.set_page_config(page_title="Nano Banana (Webtoon Engine)", page_icon="🍌", layout="wide")
 
 try:
     DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
@@ -22,57 +25,58 @@ except:
 MODEL_WORKER = "gemini-3-pro-image-preview"
 MODEL_INSPECTOR = "gemini-3-flash-preview"
 
-# 작업자 프롬프트
+# --- [2. 프롬프트 엔지니어링 (CSS/Webtoon 전략)] ---
+
+# 작업자 프롬프트 (웹툰 스타일 + CSS 메타포)
 DEFAULT_PROMPT = """
-# Role
-당신은 세계 최고의 "만화 전문 번역 및 식자(Typesetter) AI"입니다. 원본 이미지의 예술적 가치를 완벽하게 보존하면서, 일본어 텍스트를 자연스러운 [한국어]로 변환하여 프로덕션 레벨의 결과물을 완성하십시오.
+# ROLE: Professional Korean Webtoon Editor
+You are converting a Japanese Manga into a **[KOREAN WEBTOON]** format.
+Your primary mission is to modernize the typography using standard Webtoon rules.
 
-# 1. 원본 읽기 규칙 (중요: Source Reading Protocol)
-- **읽는 순서 (Right-to-Left):** 이 이미지는 일본 만화입니다. 컷의 배치와 말풍선의 순서를 반드시 **오른쪽에서 왼쪽(Right-to-Left)** 방향으로 해석하십시오.
-- **문맥 논리:** 오른쪽의 말풍선(질문/원인)을 먼저 해석하고 왼쪽의 말풍선(답변/결과)을 나중에 해석하여, 대화의 인과관계가 뒤바키지 않게 하십시오.
+# 1. VISUAL/GEOMETRIC RULES [CRITICAL]
+- **Writing Mode:** `horizontal-tb` (Top-to-Bottom, Left-to-Right).
+- **FORBIDDEN:** NEVER use `vertical-rl` (Vertical text). It looks broken in Webtoon format.
+- **Narrow Bubble Algorithm:**
+  - IF a speech bubble is TALL and NARROW (vertical shape):
+  - **ACTION:** Break lines frequently (every 2-4 characters).
+  - **GOAL:** Stack short horizontal lines vertically, instead of rotating the text.
+  - *Example:* "안녕\n하세요\n반갑\n습니다" (O) vs "안녕하세요반갑습니다" (X - Overflow)
 
-# 2. 시각적 제약 및 원본 보존 (Pixel-Perfect Integrity)
-- **[절대 원칙] 원본 훼손 금지:** 텍스트가 있는 말풍선 영역을 제외한 캐릭터, 배경, 펜 선, 스크린톤 등은 **단 1픽셀도 변형하거나 왜곡하지 마십시오.**
-- **부분 수정(Inpainting):** 원본 일본어 텍스트만 깨끗이 지우고, 글자 뒤에 가려져 있던 배경(효과선, 배경 패턴 등)을 자연스럽게 복원하십시오.
+# 2. LOCALIZATION & INPAINTING
+- **Reading Order:** Detect context from **Right-to-Left (RTL)**, but render text **Left-to-Right (LTR)**.
+- **Inpainting:** Completely erase original text. Reconstruct background/art seamlessly.
+- **Font Style:**
+  - Dialogue: Sans-serif (Gothic/Dotum). Clean & Readable.
+  - SFX: Redraw sound effects with Korean Onomatopoeia (Dynamic Brush Style).
 
-# 3. 타이포그래피 및 식자 가이드
-- **쓰기 방향 (Horizontal):** 읽는 방향과 달리, 번역된 한국어 텍스트는 반드시 **가로쓰기(왼쪽→오른쪽)**로 입력하십시오. **세로쓰기는 절대 금지**입니다.
-- **폰트 스타일 매칭:**
-  - **대화(Dialogue):** 가독성 좋은 고딕체(Sans-serif) 스타일.
-  - **독백/나레이션:** 진지한 느낌의 명조체(Serif) 스타일.
-  - **효과음(SFX):** 원본의 거칠거나 굵은 느낌을 살린 붓글씨/디자인 폰트.
-- **정렬:** 텍스트는 말풍선 중앙에 배치하고, 테두리에 닿지 않도록 여백을 확보하십시오.
-
-# Output
-설명이나 사족 없이, 처리가 완료된 **이미지 파일만** 반환하십시오.
+# 3. OUTPUT
+Return ONLY the processed image. Pixel-perfect preservation of character art is required.
 """
 
 # 감독관 프롬프트 (JSON 출력 강제)
 INSPECTOR_PROMPT = """
 # Role
-You are a QA Supervisor for Korean Manga Localization.
+You are a QA Supervisor for Korean Webtoon Localization.
 
 # Task
-Compare the [Original Image] and the [Translated Result] and inspect for CRITICAL FAILURES.
+Inspect the [Generated Image] for CRITICAL FAILURES based on the [Original Image].
 
-# Checklist (Fail Conditions)
-1. **Vertical Text:** Is there any Korean text written vertically (Top-to-Bottom)?
-2. **Text Overflow:** Is text touching the speech bubble borders or cropped?
-3. **Hallucination/Blur:** Is the image blurry, or are faces distorted?
-4. **Untranslated:** Is there any original Japanese/English text remaining?
-5. **Wrong Language:** Is the output text NOT Korean?
+# PASS/FAIL CRITERIA
+1. **Vertical Text (FATAL):** Is ANY Korean text written vertically? -> FAIL immediately.
+2. **Text Overflow:** Is text touching the borders? -> FAIL.
+3. **Language:** Is there untranslated Japanese? -> FAIL.
+4. **Distortion:** Is the face/art melted or blurry? -> FAIL.
 
 # Output Format (JSON ONLY)
-You must return a JSON object. Do not explain textually.
+Return a single JSON object.
 If PASS: {"status": "PASS"}
-If FAIL: {"status": "FAIL", "reason": "Brief reason here (e.g. Vertical text detected)"}
+If FAIL: {"status": "FAIL", "reason": "Vertical text detected in top-right bubble"}
 """
 
-# --- [2. 유틸리티 (클라우드 안전 버전)] ---
+# --- [3. 유틸리티 (클라우드 안전 버전)] ---
 
 def save_image_to_temp(image: Image.Image, filename: str) -> str:
-    """[수정] 시스템 임시 폴더에 저장 (권한 문제 해결)"""
-    # tempfile 모듈을 사용하여 OS가 지정한 임시 폴더(/tmp 등)에 저장
+    """시스템 임시 폴더에 저장 (권한 문제 해결)"""
     temp_dir = tempfile.gettempdir()
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
     path = os.path.join(temp_dir, safe_name)
@@ -89,7 +93,6 @@ def load_image_from_path(path: str) -> Image.Image:
     return None
 
 def init_session_state():
-    """[수정] 디스크 로딩(pickle) 제거 -> 메모리 세션만 사용"""
     defaults = {
         'job_queue': [], 
         'results': [],
@@ -101,7 +104,7 @@ def init_session_state():
         if key not in st.session_state: st.session_state[key] = value
 
 def clear_all_data():
-    """[수정] 전체 폴더 삭제 금지 -> 내 세션 데이터만 초기화"""
+    """내 세션 데이터만 초기화"""
     st.session_state.job_queue = []
     st.session_state.results = []
     st.rerun()
@@ -136,11 +139,9 @@ def show_full_image(image_path, caption):
     if img:
         st.image(img, caption=caption, use_container_width=True)
     else:
-        st.error("이미지를 찾을 수 없습니다. (세션이 만료되었을 수 있습니다)")
+        st.error("이미지를 찾을 수 없습니다.")
 
-# --- [3. AI 로직 (생성 + 검수)] ---
-
-import json
+# --- [4. AI 로직 (핵심 엔진)] ---
 
 def verify_image(api_key, original_img, generated_img):
     """JSON 모드로 검수"""
@@ -159,7 +160,7 @@ def verify_image(api_key, original_img, generated_img):
             model=MODEL_INSPECTOR,
             contents=contents,
             config=types.GenerateContentConfig(
-                temperature=0.0,
+                temperature=0.1, # 검수는 냉철하게
                 response_mime_type="application/json"
             )
         )
@@ -179,30 +180,59 @@ def verify_image(api_key, original_img, generated_img):
         return True, f"Inspector Error: {e} (Skipped)"
 
 def generate_with_auto_fix(api_key, prompt, image_input, resolution, temperature, max_retries=2, status_container=None):
-    """Native API 적용"""
+    """
+    [핵심] 세로쓰기 방지 알고리즘 적용
+    - CSS 메타포 사용
+    - Temperature 동적 보정
+    - 재시도 시 강력한 경고 주입
+    """
     client = genai.Client(api_key=api_key)
     target_bytes = image_to_bytes(image_input)
     last_error = ""
 
     for attempt in range(max_retries + 1):
         try:
+            # 1. Temperature 동적 보정 (Dynamic Adjustment)
+            # 재시도인데 Temperature가 너무 낮으면, 편향을 깨기 위해 0.6으로 강제 상향
+            current_temp = temperature
+            if attempt > 0 and temperature < 0.5:
+                current_temp = 0.6
+                if status_container: status_container.write(f"🔥 **재시도 전략 변경:** 창의성을 {current_temp}로 높여 고정관념을 깹니다.")
+
             if status_container:
                 retry_msg = f" (시도 {attempt+1})" if attempt > 0 else ""
-                status_container.write(f"🎨 **이미지 생성 중...** {retry_msg} | 해상도: {resolution}")
-            
-            contents = [prompt]
-            if attempt > 0 and last_error:
-                contents.append(f"⚠️ PREVIOUS ATTEMPT FAILED: {last_error}")
-                contents.append("Please fix the issues mentioned above and try again.")
-            contents.append("Now, process this image:")
-            contents.append(types.Part.from_bytes(data=target_bytes, mime_type="image/png"))
+                status_container.write(f"🎨 **이미지 생성 중...** {retry_msg} | Res: {resolution} | Temp: {current_temp}")
 
+            # 2. 프롬프트 강화 (CSS Injection)
+            css_instruction = (
+                "\n# TECHNICAL OVERRIDE:\n"
+                "Apply CSS: `writing-mode: horizontal-tb !important;`\n"
+                "If bubbles are narrow, FORCE line breaks every 2-3 chars.\n"
+                "DO NOT respect the original bubble shape if it implies vertical text.\n"
+            )
+            
+            # 재시도 시 비명 지르기
+            retry_instruction = ""
+            if attempt > 0 and last_error:
+                retry_instruction = (
+                    f"\n🚨 **PREVIOUS ERROR: {last_error}** 🚨\n"
+                    "You generated VERTICAL text. This is a FATAL ERROR.\n"
+                    "SWITCH TO 'WEBTOON MODE'. Use SHORT, HORIZONTAL lines only.\n"
+                )
+
+            # 3. 콘텐츠 구성 (이미지 -> 텍스트 순서가 제어에 더 효과적일 수 있음)
+            contents = [
+                prompt + css_instruction + retry_instruction,
+                "Process this image:",
+                types.Part.from_bytes(data=target_bytes, mime_type="image/png"),
+                "REMEMBER: HORIZONTAL TEXT ONLY."
+            ]
+
+            # 4. Config & Safety
             config = types.GenerateContentConfig(
-                temperature=temperature,
+                temperature=current_temp,
                 response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(
-                    image_size=resolution
-                ),
+                image_config=types.ImageConfig(image_size=resolution),
                 safety_settings=[
                     types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
                     types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
@@ -211,26 +241,39 @@ def generate_with_auto_fix(api_key, prompt, image_input, resolution, temperature
                 ]
             )
 
+            # 5. 실행
             response = client.models.generate_content(
                 model=MODEL_WORKER,
                 contents=contents,
                 config=config
             )
             
+            # 6. 결과 파싱 및 Safety Check
             result_img = None
+            
+            # (디버깅) 차단 여부 확인
+            if response.candidates:
+                candidate = response.candidates[0]
+                if candidate.finish_reason and candidate.finish_reason != "STOP":
+                    msg = f"Google Safety Filter 차단 ({candidate.finish_reason})"
+                    if status_container: status_container.write(f"🚫 {msg}")
+                    return None, msg
+
             if response.parts:
                 for part in response.parts:
                     if part.inline_data: 
                         result_img = Image.open(io.BytesIO(part.inline_data.data))
                     elif hasattr(part, 'image') and part.image: 
                         result_img = part.image
+            
             if not result_img and hasattr(response, 'image') and response.image: 
                 result_img = response.image
 
             if not result_img:
-                if status_container: status_container.write("❌ 이미지 생성 실패 (빈 결과)")
-                return None, "이미지 생성 결과가 비어있습니다."
+                if status_container: status_container.write("❌ 빈 결과 반환 (서버 오류 또는 필터)")
+                return None, "이미지 생성 실패"
 
+            # 7. 검수 (Inspector)
             if attempt < max_retries:
                 if status_container: status_container.write(f"🧐 **품질 검수 중...**")
                 
@@ -240,8 +283,8 @@ def generate_with_auto_fix(api_key, prompt, image_input, resolution, temperature
                     return result_img, None 
                 else:
                     last_error = reason
-                    if status_container: status_container.write(f"🚨 **검수 불합격**: {reason} -> 재시도 중...")
-                    time.sleep(1.5)
+                    if status_container: status_container.write(f"🚨 **검수 불합격**: {reason} -> 전략 수정 후 재시도...")
+                    time.sleep(1.0)
                     continue
             else:
                 if status_container: status_container.write("⚠️ 최대 재시도 횟수 도달. 현재 결과를 반환합니다.")
@@ -257,7 +300,7 @@ def process_and_update(item, api_key, prompt, resolution, temperature, use_autof
     """단일 실행 처리"""
     original_img = load_image_from_path(item['image_path'])
     if not original_img:
-        st.error("원본 이미지를 찾을 수 없습니다. (새로고침 시 임시 파일이 삭제되었을 수 있습니다)")
+        st.error("원본 이미지가 만료되었습니다. 다시 업로드해주세요.")
         return
 
     start_time = time.time()
@@ -266,13 +309,13 @@ def process_and_update(item, api_key, prompt, resolution, temperature, use_autof
         if use_autofix:
             res_img, err = generate_with_auto_fix(api_key, prompt, original_img, resolution, temperature, status_container=status)
         else:
+            # Auto-fix 끄면 재시도 0회
             res_img, err = generate_with_auto_fix(api_key, prompt, original_img, resolution, temperature, max_retries=0, status_container=status)
 
         end_time = time.time()
         duration = end_time - start_time
 
         if res_img:
-            # [수정] 시스템 임시 폴더에 저장
             res_path = save_image_to_temp(res_img, f"result_{item['name']}")
             
             status.update(label=f"✅ 작업 완료! ({duration:.2f}초)", state="complete", expanded=False)
@@ -293,14 +336,11 @@ def process_and_update(item, api_key, prompt, resolution, temperature, use_autof
             item['error_msg'] = err
             st.rerun()
 
-# --- [4. UI 컴포넌트] ---
-from streamlit_paste_button import paste_image_button
-from streamlit_image_comparison import image_comparison
-
+# --- [5. UI 컴포넌트] ---
 def render_sidebar():
     with st.sidebar:
         st.title("🍌 Nano Banana")
-        st.caption("Cloud Edition (Safe Mode)")
+        st.caption("Webtoon Engine (Anti-Vertical)")
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
         
         st.info(f"🛠️ 작업자: {MODEL_WORKER}\n👮 감독관: {MODEL_INSPECTOR}")
@@ -312,7 +352,8 @@ def render_sidebar():
             "해상도 (Resolution)", 
             options=["4K", "2K", "1K"], 
             index=0, 
-            horizontal=True
+            horizontal=True,
+            help="4K가 가장 선명하지만, 세로쓰기 편향이 심할 땐 2K가 더 말을 잘 들을 수 있습니다."
         )
 
         temperature = st.slider(
@@ -320,20 +361,20 @@ def render_sidebar():
             min_value=0.0, 
             max_value=1.0, 
             value=0.2, 
-            step=0.1
+            step=0.1,
+            help="기본값 0.2 권장. 재시도 시 자동으로 0.6으로 보정됩니다."
         )
 
         st.divider()
         st.subheader("⚙️ 옵션")
-        use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=True)
+        use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=True, help="세로쓰기가 감지되면 자동으로 설정을 바꿔서 다시 시도합니다.")
         
-        # [수정] 클라우드에서는 내 데이터만 지움
         if st.button("🗑️ 초기화", use_container_width=True): clear_all_data()
         
         st.divider()
         use_slider = st.toggle("비교 슬라이더", value=True)
         with st.expander("📝 프롬프트 수정"):
-            prompt = st.text_area("작업 지시사항", value=DEFAULT_PROMPT, height=300)
+            prompt = st.text_area("작업 지시사항", value=DEFAULT_PROMPT, height=400)
             
         return api_key, use_slider, prompt, resolution, temperature, use_autofix
 
@@ -411,7 +452,7 @@ def render_queue(api_key, prompt, resolution, temperature, use_autofix):
                     st.image(img, use_container_width=True)
                     if st.button("🔍 확대", key=f"zoom_q_{item['id']}"): show_full_image(item['image_path'], item['name'])
                 else:
-                    st.error("이미지 유실됨 (새로고침 권장)")
+                    st.error("이미지 유실됨")
 
             with col_info:
                 st.markdown(f"**📄 {item['name']}**")
@@ -508,7 +549,6 @@ def auto_process_step(api_key, prompt, resolution, temperature, use_autofix):
 
         if res_img:
             res_path = save_image_to_temp(res_img, f"result_{item['name']}")
-            
             status.update(label=f"✅ 완료! ({duration:.2f}초)", state="complete", expanded=False)
             st.session_state.results.append({
                 'id': str(uuid.uuid4()), 
@@ -532,7 +572,7 @@ def main():
     api_key, use_slider, prompt, resolution, temperature, use_autofix = render_sidebar()
     
     st.title("🍌 Nano Banana")
-    st.markdown("**Cloud Edition** (Safe Mode & High Res)")
+    st.markdown("**Webtoon Engine** (Anti-Vertical & CSS Logic)")
     
     handle_file_upload()
     render_queue(api_key, prompt, resolution, temperature, use_autofix)
