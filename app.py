@@ -356,7 +356,7 @@ def render_sidebar():
         
         resolution = st.radio(
             "해상도 (Resolution)", 
-            options=["4K", "2K", "1K"], 
+            options=["1K", "2K", "4K"], 
             index=0, 
             horizontal=True,
             help="4K가 가장 선명하지만, 세로쓰기 편향이 심할 땐 2K가 더 말을 잘 들을 수 있습니다."
@@ -366,9 +366,9 @@ def render_sidebar():
             "창의성 (Temperature)", 
             min_value=0.0, 
             max_value=1.0, 
-            value=0.2, 
+            value=0.5, 
             step=0.1,
-            help="기본값 0.2 권장. 재시도 시 자동으로 0.6으로 보정됩니다."
+            help="기본값 0.5 권장. 재시도 시 자동으로 0.6으로 보정됩니다."
         )
 
         st.divider()
@@ -475,18 +475,66 @@ def render_results(use_slider):
     if not st.session_state.results: return
 
     st.divider()
-    c1, c2 = st.columns([4, 1])
-    c1.subheader(f"🖼️ 완료 ({len(st.session_state.results)}장)")
-    
-    if c2.button("🗑️ 비우기"):
-        st.session_state.results = []
-        st.rerun()
+    st.subheader(f"🖼️ 완료된 작업 ({len(st.session_state.results)}장)")
 
-    with st.container():
+    # --- [NEW] 저장 옵션 패널 ---
+    with st.container(border=True):
+        st.markdown("### 💾 저장 옵션")
+        c1, c2 = st.columns([1, 1])
+        
+        # 1. ZIP 파일명 설정
+        zip_name = c1.text_input("ZIP 파일 이름 설정", value="translated_manga", help="확장자(.zip)는 자동으로 붙습니다.")
+        
+        # 2. 로컬 경로 설정 (PC에서 실행 중일 때만 작동)
+        local_path = c2.text_input("PC 폴더로 직접 저장 (로컬 실행 시)", placeholder="예: C:/Manga/Chapter1", help="Streamlit을 내 컴퓨터에서 실행 중일 때만 작동합니다.")
+
+        b1, b2, b3 = st.columns([1, 1, 1])
+        
+        # [기능 1] ZIP 다운로드
         zip_data = create_zip_file()
-        st.download_button("📦 전체 다운로드 (ZIP)", zip_data, "results.zip", "application/zip", use_container_width=True, type="primary")
+        b1.download_button(
+            label="📦 ZIP으로 다운로드",
+            data=zip_data,
+            file_name=f"{zip_name}.zip",
+            mime="application/zip",
+            use_container_width=True,
+            type="primary"
+        )
+
+        # [기능 2] 로컬 폴더로 내보내기
+        if b2.button("📂 PC 폴더에 저장", use_container_width=True):
+            if not local_path:
+                st.warning("경로를 입력해주세요.")
+            else:
+                try:
+                    os.makedirs(local_path, exist_ok=True)
+                    saved_count = 0
+                    for item in st.session_state.results:
+                        # 파일명 정리
+                        safe_fname = f"kor_{item['name']}"
+                        if not safe_fname.lower().endswith('.png'): 
+                            safe_fname = os.path.splitext(safe_fname)[0] + ".png"
+                        
+                        save_full_path = os.path.join(local_path, safe_fname)
+                        
+                        # 이미지 로드 및 저장
+                        img = load_image_from_path(item['result_path'])
+                        if img:
+                            img.save(save_full_path, format="PNG")
+                            saved_count += 1
+                    
+                    st.success(f"✅ 저장 완료! ({saved_count}장) -> {local_path}")
+                except Exception as e:
+                    st.error(f"저장 실패: {e} (권한 문제거나 경로가 잘못되었습니다.)")
+
+        # [기능 3] 목록 비우기
+        if b3.button("🗑️ 목록 비우기", use_container_width=True):
+            st.session_state.results = []
+            st.rerun()
 
     st.divider()
+    
+    # 결과물 리스트 표시
     for item in st.session_state.results:
         with st.container(border=True):
             col_img, col_info = st.columns([1, 3])
@@ -521,7 +569,6 @@ def render_results(use_slider):
                     buf = io.BytesIO()
                     res.save(buf, format="PNG")
                     cols[2].download_button("⬇️ 다운", data=buf.getvalue(), file_name=f"kor_{item['name']}", mime="image/png", key=f"dl_{item['id']}")
-
 def auto_process_step(api_key, prompt, resolution, temperature, use_autofix):
     if not st.session_state.is_auto_running: return
     pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
@@ -589,4 +636,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
