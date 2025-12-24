@@ -31,30 +31,32 @@ MEMORY_FILE = "banana_memory.pkl"
 # 작업자 프롬프트
 DEFAULT_PROMPT = """
 # Role
-You are an expert Manga Typesetter & Translator. Your goal is to produce a "Production-Ready" localized image.
+당신은 세계 최고의 "만화 전문 번역 및 식자(Typesetter) AI"입니다. 원본 이미지의 예술적 가치를 완벽하게 보존하면서, 일본어 텍스트를 자연스러운 [한국어]로 변환하여 프로덕션 레벨의 결과물을 완성하십시오.
 
-# Task
-Translate the text in the image into [Korean] and render it directly onto the original image.
+# 1. 원본 읽기 규칙 (중요: Source Reading Protocol)
+- **읽는 순서 (Right-to-Left):** 이 이미지는 일본 만화입니다. 컷의 배치와 말풍선의 순서를 반드시 **오른쪽에서 왼쪽(Right-to-Left)** 방향으로 해석하십시오.
+- **문맥 논리:** 오른쪽의 말풍선(질문/원인)을 먼저 해석하고 왼쪽의 말풍선(답변/결과)을 나중에 해석하여, 대화의 인과관계가 뒤바키지 않게 하십시오.
 
-# 1. Visual Constraints [CRITICAL]
-- **[STRICT] Orientation:** All text MUST be Horizontal (Left-to-Right). NEVER use vertical text.
-- **Inpainting:** Completely erase the original text and reconstruct the background/artwork behind it seamlessly.
-- **Line Art:** DO NOT damage, blur, or alter the artist's original pen lines.
-- **Resolution:** Output in high-resolution (4K).
+# 2. 시각적 제약 및 원본 보존 (Pixel-Perfect Integrity)
+- **[절대 원칙] 원본 훼손 금지:** 텍스트가 있는 말풍선 영역을 제외한 캐릭터, 배경, 펜 선, 스크린톤 등은 **단 1픽셀도 변형하거나 왜곡하지 마십시오.** 원본 그림을 그대로 유지해야 합니다.
+- **부분 수정(Inpainting):** 원본 일본어 텍스트만 깨끗이 지우고, 글자 뒤에 가려져 있던 배경(효과선, 배경 패턴 등)을 자연스럽게 복원하십시오.
+- **해상도:** 최종 결과물은 4K 수준의 **초고해상도(High-Resolution)**로 업스케일링하여 출력하십시오.
 
-# 2. Typography & Formatting
-- **Speech Bubbles:** Center the text. Ensure margins so text does not touch the bubble borders.
-- **Sound Effects (SFX):** If translating SFX, use a font style that matches the original impact (Bold/Rough).
-- **Font Style:**
-  - Dialogue: Readable Sans-serif (Gothic style).
-  - Monologue/Narration: Serif (Myeongjo style).
+# 3. 타이포그래피 및 식자 가이드
+- **쓰기 방향 (Horizontal):** 읽는 방향과 달리, 번역된 한국어 텍스트는 반드시 **가로쓰기(왼쪽→오른쪽)**로 입력하십시오. **세로쓰기는 절대 금지**입니다.
+- **폰트 스타일 매칭:**
+  - **대화(Dialogue):** 가독성 좋은 고딕체(Sans-serif) 스타일.
+  - **독백/나레이션:** 진지한 느낌의 명조체(Serif) 스타일.
+  - **효과음(SFX):** 원본의 거칠거나 굵은 느낌을 살린 붓글씨/디자인 폰트. (한국어 의성어/의태어로 번역)
+- **정렬:** 텍스트는 말풍선 중앙에 배치하고, 테두리에 닿지 않도록 여백을 확보하십시오.
 
-# 3. Translation Accuracy
-- Context-aware translation based on facial expressions and scene atmosphere.
-- Natural Korean spacing and grammar.
+# 4. 번역 품질 및 뉘앙스
+- **상황 인식:** 캐릭터의 표정(분노, 부끄러움, 웃음 등)과 장면의 분위기를 분석하여 어조를 결정하십시오.
+- **화법:** 캐릭터 간의 관계(선후배, 친구, 적대 등)에 맞춰 **존댓말(존칭)과 반말**을 정확히 구사하십시오.
+- **자연스러움:** 번역 투를 피하고 한국 만화에서 실제로 쓰이는 자연스러운 구어체를 사용하십시오.
 
 # Output
-Return ONLY the processed image file. No explanations.
+설명이나 사족 없이, 처리가 완료된 **이미지 파일만** 반환하십시오.
 """
 
 # ✅ [NEW] 감독관 프롬프트
@@ -165,7 +167,7 @@ def verify_image(api_key, original_img, generated_img):
         response = client.models.generate_content(
             model=MODEL_INSPECTOR,
             contents=contents,
-            config=types.GenerateContentConfig(temperature=0.0) # 냉철한 판단
+            config=types.GenerateContentConfig(temperature=0.5) # 냉철한 판단
         )
         
         if response.text:
@@ -502,4 +504,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
