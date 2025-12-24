@@ -31,38 +31,50 @@ MEMORY_FILE = "banana_memory.pkl"
 # 작업자 프롬프트
 DEFAULT_PROMPT = """
 # Role
-당신은 완벽주의자 만화 식자(Typesetter)입니다. 당신은 현재 인사평가 중이고 기본 점수는 0점 입니다. 당신의 목표는 점수를 최대한 높이는 것 입니다.
+You are an expert Manga Typesetter & Translator. Your goal is to produce a "Production-Ready" localized image.
 
 # Task
-제공된 만화 이미지를 번역 및 식질하여 4K로 출력하세요.(성공시 점수+0.1)
-**[중요] 제공된 '예시 이미지'의 역식 방식을 모방해라.
+Translate the text in the image into [Korean] and render it directly onto the original image.
 
-# 🚨 DEATH RULES (위반 시 해고)
-1. **[절대 원칙] 가로쓰기** 세로쓰기는 절대 금지입니다.(세로쓰기시 점수-999)
-2. **[화질] 원본 보존:** 작가의 펜 선은 건드리지 마세요.(수정 할 시 점수-999)
-3. 상황, 캐릭터의 감정, 캐릭터에 성격에 맞게 번역하세요.(완벽하게 할 시 점수+10)
+# 1. Visual Constraints [CRITICAL]
+- **[STRICT] Orientation:** All text MUST be Horizontal (Left-to-Right). NEVER use vertical text.
+- **Inpainting:** Completely erase the original text and reconstruct the background/artwork behind it seamlessly.
+- **Line Art:** DO NOT damage, blur, or alter the artist's original pen lines.
+- **Resolution:** Output in high-resolution (4K).
+
+# 2. Typography & Formatting
+- **Speech Bubbles:** Center the text. Ensure margins so text does not touch the bubble borders.
+- **Sound Effects (SFX):** If translating SFX, use a font style that matches the original impact (Bold/Rough).
+- **Font Style:**
+  - Dialogue: Readable Sans-serif (Gothic style).
+  - Monologue/Narration: Serif (Myeongjo style).
+
+# 3. Translation Accuracy
+- Context-aware translation based on facial expressions and scene atmosphere.
+- Natural Korean spacing and grammar.
 
 # Output
-설명 없이 결과 이미지 파일만 출력하세요.
+Return ONLY the processed image file. No explanations.
 """
 
 # ✅ [NEW] 감독관 프롬프트
 INSPECTOR_PROMPT = """
 # Role
-You are a Quality Assurance (QA) Supervisor for Manga Translation.
+You are a QA Supervisor for Korean Manga Localization.
 
 # Task
-Compare the [Original Image] and the [Translated Result].
-Check for the following **CRITICAL ERRORS**:
+Compare the [Original Image] and the [Translated Result] and inspect for CRITICAL FAILURES.
 
-1. **Vertical Text:** Is there any Korean text written Top-to-Bottom? (Must be Horizontal)
-2. ** Hallucination:** Is the translation completely wrong or weird compared to the original? (e.g., "Taste" instead of "Make")
-3. **Broken Art:** Is the character's face or body severely distorted?
-4. **Untranslated:** Is there any Japanese text left?
+# Checklist (Fail Conditions)
+1. **Vertical Text:** Is there any Korean text written vertically (Top-to-Bottom)? -> If YES, FAIL.
+2. **Text Overflow:** Is text touching the speech bubble borders or cropped? -> If YES, FAIL.
+3. **Hallucination/Blur:** Is the image blurry, or are faces distorted? -> If YES, FAIL.
+4. **Untranslated:** Is there any original Japanese/English text remaining? -> If YES, FAIL.
+5. **Wrong Language:** Is the output text NOT Korean? -> If YES, FAIL.
 
-# Output
-- If PERFECT: Reply "PASS"
-- If FAILED: Reply "FAIL: [Reason]"
+# Output Protocol
+- If NO errors found: Reply "PASS"
+- If ANY error found: Reply "FAIL: [Brief Reason]" (e.g., "FAIL: Vertical text detected")
 """
 
 # --- [2. 유틸리티] ---
@@ -170,70 +182,96 @@ def verify_image(api_key, original_img, generated_img):
 
 def generate_with_auto_fix(api_key, prompt, image_input, ex_in, ex_out, max_retries=2):
     """
-    생성 -> 검수 -> (실패시) 재생성 루프
+    생성(Worker) -> 검수(Inspector) -> (실패시) 재생성 루프
+    Safety Settings를 추가하여 차단율을 낮추고, 검수 피드백을 반영합니다.
     """
     client = genai.Client(api_key=api_key)
     target_bytes = image_to_bytes(image_input)
     
-    current_prompt = prompt
     last_error = ""
 
     for attempt in range(max_retries + 1):
         try:
-            # 1. 생성 (Worker)
-            contents = [current_prompt]
+            # 1. 콘텐츠 구성
+            contents = [prompt]
+            
+            # 예시 데이터가 있으면 추가 (퓨샷 학습)
             if ex_in and ex_out:
                 ex_in_b = image_to_bytes(ex_in)
                 ex_out_b = image_to_bytes(ex_out)
-                contents.extend(["Example In:", types.Part.from_bytes(data=ex_in_b, mime_type="image/png"),
-                                 "Example Out:", types.Part.from_bytes(data=ex_out_b, mime_type="image/png")])
+                contents.extend([
+                    "Example Input Image (Reference):", 
+                    types.Part.from_bytes(data=ex_in_b, mime_type="image/png"),
+                    "Example Output Image (Target Style):", 
+                    types.Part.from_bytes(data=ex_out_b, mime_type="image/png")
+                ])
             
-            # 이전 시도에서 실패했다면 피드백을 추가
-            if attempt > 0:
-                contents.append(f"⚠️ Previous attempt FAILED due to: {last_error}. FIX IT THIS TIME.")
+            # 이전 시도에서 검수 실패 시 피드백 추가
+            if attempt > 0 and last_error:
+                contents.append(f"⚠️ PREVIOUS ATTEMPT FAILED: {last_error}")
+                contents.append("Please fix the issues mentioned above and try again.")
 
+            # 대상 이미지 추가
+            contents.append("Now, process this image:")
             contents.append(types.Part.from_bytes(data=target_bytes, mime_type="image/png"))
 
-            # 3 Pro 4K 설정
-            config_params = {"response_modalities": ["IMAGE"]}
-            config_params["image_config"] = types.ImageConfig(image_size="4K")
+            # 2. API 설정 (4K 출력 + 안전 설정 해제)
+            config_params = {
+                "response_modalities": ["IMAGE"],
+                "image_config": types.ImageConfig(image_size="4K")
+            }
+            
+            # 만화의 액션/표현이 차단되지 않도록 모든 카테고리 해제
+            safety_settings = [
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+            ]
 
+            # 3. 이미지 생성 실행
             response = client.models.generate_content(
                 model=MODEL_WORKER,
                 contents=contents,
-                config=types.GenerateContentConfig(temperature=0.1, **config_params)
+                config=types.GenerateContentConfig(
+                    temperature=0.2, # 약간의 유연성을 위해 0.2 설정
+                    safety_settings=safety_settings,
+                    **config_params
+                )
             )
             
             result_img = None
             if response.parts:
                 for part in response.parts:
-                    if part.inline_data: result_img = Image.open(io.BytesIO(part.inline_data.data))
-                    elif hasattr(part, 'image') and part.image: result_img = part.image
-            if hasattr(response, 'image') and response.image: result_img = response.image
+                    if part.inline_data: 
+                        result_img = Image.open(io.BytesIO(part.inline_data.data))
+                    elif hasattr(part, 'image') and part.image: 
+                        result_img = part.image
+            if not result_img and hasattr(response, 'image') and response.image: 
+                result_img = response.image
 
             if not result_img:
-                return None, "이미지 생성 실패"
+                return None, "이미지 생성 결과가 비어있습니다. (Safety Filter 가능성)"
 
-            # 2. 검수 (Inspector)
-            # 마지막 시도면 검수 생략하고 그냥 줌
-            if attempt == max_retries:
-                return result_img, f"최종 시도 완료 (검수 생략)"
-
-            is_pass, reason = verify_image(api_key, image_input, result_img)
-            
-            if is_pass:
-                return result_img, None # 통과
+            # 4. 검수 (Inspector) - 마지막 시도가 아닐 때만 실행
+            if attempt < max_retries:
+                is_pass, reason = verify_image(api_key, image_input, result_img)
+                if is_pass:
+                    return result_img, None # 통과 시 즉시 반환
+                else:
+                    last_error = reason
+                    st.toast(f"🚨 검수 불합격 ({attempt+1}/{max_retries}): {reason}")
+                    time.sleep(1.5) # API 할당량 제한을 고려한 짧은 대기
+                    continue
             else:
-                # 실패: 피드백 저장하고 재시도
-                last_error = reason
-                st.toast(f"🚨 검수 불합격 ({attempt+1}/{max_retries}): {reason} -> 재생성 중...")
-                time.sleep(1) # 잠시 대기
-                continue
+                # 마지막 시도라면 검수 결과와 상관없이 출력
+                return result_img, "최종 시도 완료 (검수 미통과 포함)"
 
         except Exception as e:
-            return None, f"API 에러: {str(e)}"
+            # API 에러 발생 시 재시도하지 않고 에러 반환 (Key 문제 등)
+            return None, f"API 에러 발생: {str(e)}"
             
-    return None, "재시도 횟수 초과"
+    return None, "재시도 횟수를 초과했습니다."
 
 def process_and_update(item, api_key, prompt, ex_in, ex_out, use_autofix):
     with st.spinner(f"✨ 작업 중... ({item['name']})"):
@@ -464,3 +502,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
