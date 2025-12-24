@@ -13,32 +13,32 @@ from streamlit_paste_button import paste_image_button
 from streamlit_image_comparison import image_comparison
 
 # --- [1. 기본 설정] ---
-st.set_page_config(page_title="Nano Banana (ZIP Download)", page_icon="🍌", layout="wide")
+st.set_page_config(page_title="Nano Banana (Auto-Fix)", page_icon="🍌", layout="wide")
 
 try:
     DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
     DEFAULT_API_KEY = ""
 
-MODELS = [
-    "gemini-3-pro-image-preview",
-    "gemini-2.0-flash-exp",
-]
+# 모델 설정
+MODEL_WORKER = "gemini-3-pro-image-preview"  # 작업자 (고화질)
+MODEL_INSPECTOR = "gemini-3-flash-preview"     # 감독관 (빠름/검수용)
 
 DEFAULT_EX_IN_PATH = "example_in.png"
 DEFAULT_EX_OUT_PATH = "example_out.png"
 MEMORY_FILE = "banana_memory.pkl"
 
+# 작업자 프롬프트
 DEFAULT_PROMPT = """
 # Role
 당신은 완벽주의자 만화 식자(Typesetter)입니다. 당신은 현재 인사평가 중이고 기본 점수는 0점 입니다. 당신의 목표는 점수를 최대한 높이는 것 입니다.
 
 # Task
 제공된 만화 이미지를 번역 및 식질하여 4K로 출력하세요.(성공시 점수+0.1)
-**[중요] 제공된 '예시 이미지'의 스타일과 레이아웃을 완벽하게 모방하세요.**
+**[중요] 제공된 '예시 이미지'의 역식 방식을 모방해라.
 
 # 🚨 DEATH RULES (위반 시 해고)
-1. **[절대 원칙] 가로쓰기 (Horizontal ONLY):** 세로쓰기는 절대 금지입니다.(세로쓰기시 점수-999)
+1. **[절대 원칙] 가로쓰기** 세로쓰기는 절대 금지입니다.(세로쓰기시 점수-999)
 2. **[화질] 원본 보존:** 작가의 펜 선은 건드리지 마세요.(수정 할 시 점수-999)
 3. 상황, 캐릭터의 감정, 캐릭터에 성격에 맞게 번역하세요.(완벽하게 할 시 점수+10)
 
@@ -46,8 +46,26 @@ DEFAULT_PROMPT = """
 설명 없이 결과 이미지 파일만 출력하세요.
 """
 
-# --- [2. 유틸리티] ---
+# ✅ [NEW] 감독관 프롬프트
+INSPECTOR_PROMPT = """
+# Role
+You are a Quality Assurance (QA) Supervisor for Manga Translation.
 
+# Task
+Compare the [Original Image] and the [Translated Result].
+Check for the following **CRITICAL ERRORS**:
+
+1. **Vertical Text:** Is there any Korean text written Top-to-Bottom? (Must be Horizontal)
+2. ** Hallucination:** Is the translation completely wrong or weird compared to the original? (e.g., "Taste" instead of "Make")
+3. **Broken Art:** Is the character's face or body severely distorted?
+4. **Untranslated:** Is there any Japanese text left?
+
+# Output
+- If PERFECT: Reply "PASS"
+- If FAILED: Reply "FAIL: [Reason]"
+"""
+
+# --- [2. 유틸리티] ---
 def save_session_to_disk():
     try:
         state_data = {'job_queue': st.session_state.job_queue, 'results': st.session_state.results}
@@ -88,64 +106,143 @@ def image_to_bytes(image: Image.Image) -> bytes:
     image.save(img_byte_arr, format='PNG')
     return img_byte_arr.getvalue()
 
-# ✅ [NEW] ZIP 파일 생성 함수
 def create_zip_file():
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         for item in st.session_state.results:
-            # 이미지 바이트 변환
             img_bytes = io.BytesIO()
             item['result'].save(img_bytes, format='PNG')
-            
-            # 파일명 설정 (kor_파일명.png)
             filename = f"kor_{item['name']}"
-            if not filename.lower().endswith('.png'):
-                filename = os.path.splitext(filename)[0] + ".png"
-            
-            # ZIP에 쓰기
+            if not filename.lower().endswith('.png'): filename = os.path.splitext(filename)[0] + ".png"
             zip_file.writestr(filename, img_bytes.getvalue())
-    
     return zip_buffer.getvalue()
+
+def save_to_local_folder(folder_name):
+    if not folder_name: return
+    try:
+        os.makedirs(folder_name, exist_ok=True)
+        count = 0
+        for item in st.session_state.results:
+            safe_name = f"kor_{item['name']}"
+            if not safe_name.lower().endswith('.png'): safe_name = os.path.splitext(safe_name)[0] + ".png"
+            item['result'].save(os.path.join(folder_name, safe_name), format="PNG")
+            count += 1
+        st.success(f"✅ 저장 완료: {count}장")
+    except Exception as e: st.error(f"저장 실패: {e}")
 
 @st.dialog("📷 이미지 전체 화면", width="large")
 def show_full_image(image, caption):
     st.image(image, caption=caption, use_container_width=True)
 
-# --- [3. AI 로직] ---
-def generate_one_shot(api_key, model_name, prompt, image_input, ex_in=None, ex_out=None):
+# --- [3. AI 로직 (생성 + 검수)] ---
+
+def verify_image(api_key, original_img, generated_img):
+    """감독관(Flash)이 결과물을 검사하는 함수"""
     try:
         client = genai.Client(api_key=api_key)
-        target_bytes = image_to_bytes(image_input)
         
-        contents = [prompt]
-        if ex_in and ex_out:
-            ex_in_bytes = image_to_bytes(ex_in)
-            ex_out_bytes = image_to_bytes(ex_out)
-            contents.extend(["Example Input:", types.Part.from_bytes(data=ex_in_bytes, mime_type="image/png"),
-                             "Example Output:", types.Part.from_bytes(data=ex_out_bytes, mime_type="image/png"),
-                             "Target Image:"])
-
-        contents.append(types.Part.from_bytes(data=target_bytes, mime_type="image/png"))
-
-        config_params = {"response_modalities": ["IMAGE"]}
-        if "gemini-3" in model_name: config_params["image_config"] = types.ImageConfig(image_size="4K")
+        # 원본과 결과물을 비교하게 함
+        contents = [
+            INSPECTOR_PROMPT,
+            "Here is the ORIGINAL image:",
+            types.Part.from_bytes(data=image_to_bytes(original_img), mime_type="image/png"),
+            "Here is the GENERATED result:",
+            types.Part.from_bytes(data=image_to_bytes(generated_img), mime_type="image/png")
+        ]
 
         response = client.models.generate_content(
-            model=model_name, contents=contents,
-            config=types.GenerateContentConfig(temperature=0.0, **config_params)
+            model=MODEL_INSPECTOR,
+            contents=contents,
+            config=types.GenerateContentConfig(temperature=0.0) # 냉철한 판단
         )
         
-        if response.parts:
-            for part in response.parts:
-                if part.inline_data: return Image.open(io.BytesIO(part.inline_data.data)), None
-                if hasattr(part, 'image') and part.image: return part.image, None
-        if hasattr(response, 'image') and response.image: return response.image, None
-        return None, "이미지 생성 실패"
-    except Exception as e: return None, f"API 에러: {str(e)}"
+        if response.text:
+            result = response.text.strip()
+            if "PASS" in result:
+                return True, "PASS"
+            else:
+                return False, result # 실패 사유 반환
+        return True, "Unknown Response (Passed)" # 애매하면 통과
+        
+    except Exception as e:
+        print(f"검수 오류: {e}")
+        return True, "Inspector Error (Skipped)" # 검수기 고장나면 그냥 통과
 
-def process_and_update(item, api_key, model, prompt, ex_in, ex_out):
+def generate_with_auto_fix(api_key, prompt, image_input, ex_in, ex_out, max_retries=2):
+    """
+    생성 -> 검수 -> (실패시) 재생성 루프
+    """
+    client = genai.Client(api_key=api_key)
+    target_bytes = image_to_bytes(image_input)
+    
+    current_prompt = prompt
+    last_error = ""
+
+    for attempt in range(max_retries + 1):
+        try:
+            # 1. 생성 (Worker)
+            contents = [current_prompt]
+            if ex_in and ex_out:
+                ex_in_b = image_to_bytes(ex_in)
+                ex_out_b = image_to_bytes(ex_out)
+                contents.extend(["Example In:", types.Part.from_bytes(data=ex_in_b, mime_type="image/png"),
+                                 "Example Out:", types.Part.from_bytes(data=ex_out_b, mime_type="image/png")])
+            
+            # 이전 시도에서 실패했다면 피드백을 추가
+            if attempt > 0:
+                contents.append(f"⚠️ Previous attempt FAILED due to: {last_error}. FIX IT THIS TIME.")
+
+            contents.append(types.Part.from_bytes(data=target_bytes, mime_type="image/png"))
+
+            # 3 Pro 4K 설정
+            config_params = {"response_modalities": ["IMAGE"]}
+            config_params["image_config"] = types.ImageConfig(image_size="4K")
+
+            response = client.models.generate_content(
+                model=MODEL_WORKER,
+                contents=contents,
+                config=types.GenerateContentConfig(temperature=0.1, **config_params)
+            )
+            
+            result_img = None
+            if response.parts:
+                for part in response.parts:
+                    if part.inline_data: result_img = Image.open(io.BytesIO(part.inline_data.data))
+                    elif hasattr(part, 'image') and part.image: result_img = part.image
+            if hasattr(response, 'image') and response.image: result_img = response.image
+
+            if not result_img:
+                return None, "이미지 생성 실패"
+
+            # 2. 검수 (Inspector)
+            # 마지막 시도면 검수 생략하고 그냥 줌
+            if attempt == max_retries:
+                return result_img, f"최종 시도 완료 (검수 생략)"
+
+            is_pass, reason = verify_image(api_key, image_input, result_img)
+            
+            if is_pass:
+                return result_img, None # 통과
+            else:
+                # 실패: 피드백 저장하고 재시도
+                last_error = reason
+                st.toast(f"🚨 검수 불합격 ({attempt+1}/{max_retries}): {reason} -> 재생성 중...")
+                time.sleep(1) # 잠시 대기
+                continue
+
+        except Exception as e:
+            return None, f"API 에러: {str(e)}"
+            
+    return None, "재시도 횟수 초과"
+
+def process_and_update(item, api_key, prompt, ex_in, ex_out, use_autofix):
     with st.spinner(f"✨ 작업 중... ({item['name']})"):
-        res_img, err = generate_one_shot(api_key, model, prompt, item['image'], ex_in, ex_out)
+        if use_autofix:
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out)
+        else:
+            # 검수 없이 1회 실행
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out, max_retries=0)
+
         if res_img:
             st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
@@ -161,11 +258,17 @@ def process_and_update(item, api_key, model, prompt, ex_in, ex_out):
 def render_sidebar():
     with st.sidebar:
         st.title("🍌 Nano Banana")
-        st.caption("ZIP Download Edition")
+        st.caption("Auto-Fix Edition")
         api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
-        model = st.selectbox("모델 선택", MODELS, index=0)
         
-        if st.button("🗑️ 모든 데이터 초기화", type="primary", use_container_width=True): clear_all_data()
+        # 모델 선택은 제거 (자동으로 3 Pro + 2 Flash 조합 사용)
+        st.info(f"🛠️ 작업자: {MODEL_WORKER}\n👮 감독관: {MODEL_INSPECTOR}")
+
+        st.divider()
+        st.subheader("⚙️ 옵션")
+        use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=True, help="결과물이 이상하면 자동으로 다시 시도합니다. (시간 더 걸림)")
+        
+        if st.button("🗑️ 초기화", use_container_width=True): clear_all_data()
 
         st.divider()
         st.subheader("📚 예시 학습")
@@ -183,9 +286,9 @@ def render_sidebar():
         st.divider()
         use_slider = st.toggle("비교 슬라이더", value=True)
         with st.expander("📝 프롬프트 수정"):
-            prompt = st.text_area("AI 지시사항", value=DEFAULT_PROMPT, height=350)
+            prompt = st.text_area("작업 지시사항", value=DEFAULT_PROMPT, height=300)
             
-        return api_key, model, use_slider, prompt, ex_in, ex_out
+        return api_key, use_slider, prompt, ex_in, ex_out, use_autofix
 
 def handle_file_upload():
     col1, col2 = st.columns([3, 1])
@@ -226,7 +329,7 @@ def handle_file_upload():
             save_session_to_disk()
             st.rerun()
 
-def render_queue(api_key, model, prompt, ex_in, ex_out):
+def render_queue(api_key, prompt, ex_in, ex_out, use_autofix):
     if not st.session_state.job_queue: return
 
     st.divider()
@@ -248,7 +351,7 @@ def render_queue(api_key, model, prompt, ex_in, ex_out):
         save_session_to_disk()
         st.rerun()
 
-    if st.session_state.is_auto_running: st.progress(100, text="🔄 자동 처리 중...")
+    if st.session_state.is_auto_running: st.progress(100, text="🔄 자동 작업 중...")
 
     for item in st.session_state.job_queue:
         with st.container(border=True):
@@ -262,7 +365,7 @@ def render_queue(api_key, model, prompt, ex_in, ex_out):
                 elif item['status'] == 'pending': st.info("⏳ 대기 중")
                 
                 b1, b2, b3 = st.columns([1, 1, 3])
-                if b1.button("▶️ 실행", key=f"run_{item['id']}"): process_and_update(item, api_key, model, prompt, ex_in, ex_out)
+                if b1.button("▶️ 실행", key=f"run_{item['id']}"): process_and_update(item, api_key, prompt, ex_in, ex_out, use_autofix)
                 if b2.button("🗑️ 삭제", key=f"del_{item['id']}"):
                     st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
                     save_session_to_disk()
@@ -280,17 +383,9 @@ def render_results(use_slider):
         save_session_to_disk()
         st.rerun()
 
-    # ✅ [NEW] ZIP 다운로드 버튼
     with st.container():
         zip_data = create_zip_file()
-        st.download_button(
-            label="📦 전체 결과 다운로드 (ZIP)",
-            data=zip_data,
-            file_name="nano_banana_results.zip",
-            mime="application/zip",
-            use_container_width=True,
-            type="primary"
-        )
+        st.download_button("📦 전체 다운로드 (ZIP)", zip_data, "results.zip", "application/zip", use_container_width=True, type="primary")
 
     st.divider()
     for item in st.session_state.results:
@@ -322,7 +417,7 @@ def render_results(use_slider):
                 item['result'].save(buf, format="PNG")
                 cols[2].download_button("⬇️ 다운", data=buf.getvalue(), file_name=f"kor_{item['name']}", mime="image/png", key=f"dl_{item['id']}")
 
-def auto_process_step(api_key, model, prompt, ex_in, ex_out):
+def auto_process_step(api_key, prompt, ex_in, ex_out, use_autofix):
     if not st.session_state.is_auto_running: return
     pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
     
@@ -335,7 +430,11 @@ def auto_process_step(api_key, model, prompt, ex_in, ex_out):
 
     item = pending[0]
     with st.spinner(f"자동 처리 중... {item['name']}"):
-        res_img, err = generate_one_shot(api_key, model, prompt, item['image'], ex_in, ex_out)
+        if use_autofix:
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out)
+        else:
+            res_img, err = generate_with_auto_fix(api_key, prompt, item['image'], ex_in, ex_out, max_retries=0)
+
         if res_img:
             st.session_state.results.append({'id': str(uuid.uuid4()), 'name': item['name'], 'original': item['image'], 'result': res_img})
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
@@ -351,17 +450,17 @@ def auto_process_step(api_key, model, prompt, ex_in, ex_out):
 # --- [6. 메인 실행] ---
 def main():
     init_session_state()
-    api_key, model, use_slider, prompt, ex_in, ex_out = render_sidebar()
+    api_key, use_slider, prompt, ex_in, ex_out, use_autofix = render_sidebar()
     
     st.title("🍌 Nano Banana")
-    st.markdown("**ZIP Download Edition**")
+    st.markdown("**Auto-Fix Edition** (with Supervisor AI)")
     
     handle_file_upload()
-    render_queue(api_key, model, prompt, ex_in, ex_out)
+    render_queue(api_key, prompt, ex_in, ex_out, use_autofix)
     render_results(use_slider)
 
     if st.session_state.is_auto_running:
-        auto_process_step(api_key, model, prompt, ex_in, ex_out)
+        auto_process_step(api_key, prompt, ex_in, ex_out, use_autofix)
 
 if __name__ == "__main__":
     main()
