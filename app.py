@@ -23,8 +23,8 @@ except:
     DEFAULT_API_KEY = ""
 
 # 모델 설정
-MODEL_WORKER = "gemini-2.0-flash-exp" # 혹은 "gemini-1.5-pro" 등 사용 가능한 최신 모델
-MODEL_INSPECTOR = "gemini-2.0-flash-exp" # 빠르고 저렴한 모델 권장
+MODEL_WORKER = "gemini-3-pro-image-preview" 
+MODEL_INSPECTOR = "gemini-3-flash-preview" 
 
 # --- [2. 프롬프트 정의] ---
 
@@ -419,10 +419,10 @@ def render_sidebar():
         st.subheader("⚙️ 모델 설정")
         
         # 해상도 (참고: API 버전에 따라 image_size가 무시될 수 있음)
-        resolution = st.radio("해상도", options=["2K", "1K"], index=0, horizontal=True)
+        resolution = st.radio("해상도", options=["2K", "1K", "4K"], index=0, horizontal=True)
         res_tuple = (2048, 2048) if resolution == "2K" else (1024, 1024)
 
-        temperature = st.slider("창의성 (Temperature)", 0.0, 1.0, 0.4, 0.1, help="낮을수록 원본 보존력이 좋지만, 0.0은 때로 번역을 거부할 수 있습니다.")
+        temperature = st.slider("창의성 (Temperature)", 0.0, 1.0, 0.5, 0.1, help="낮을수록 원본 보존력이 좋지만, 0.0은 때로 번역을 거부할 수 있습니다.")
 
         st.divider()
         st.subheader("🧐 검수 옵션 (Inspector)")
@@ -643,4 +643,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
