@@ -29,28 +29,45 @@ MODEL_INSPECTOR = "gemini-3-flash-preview"
 
 # 작업자 프롬프트 (웹툰 스타일 + CSS 메타포)
 DEFAULT_PROMPT = """
-# ROLE: Professional Korean Webtoon Editor
-You are converting a Japanese Manga into a **[KOREAN WEBTOON]** format.
-Your primary mission is to modernize the typography using standard Webtoon rules.
+**Role & Objective:**
+You are an expert Manga Localizer and Image Editor. Your task is to replace Japanese text with Korean text in the provided manga image. You must deliver a high-quality, read-to-read Korean version while **strictly preserving** the original artwork outside of text areas.
 
-# 1. VISUAL/GEOMETRIC RULES [CRITICAL]
-- **Writing Mode:** `horizontal-tb` (Top-to-Bottom, Left-to-Right).
-- **FORBIDDEN:** NEVER use `vertical-rl` (Vertical text). It looks broken in Webtoon format.
-- **Narrow Bubble Algorithm:**
-  - IF a speech bubble is TALL and NARROW (vertical shape):
-  - **ACTION:** Break lines frequently (every 2-4 characters).
-  - **GOAL:** Stack short horizontal lines vertically, instead of rotating the text.
-  - *Example:* "안녕\n하세요\n반갑\n습니다" (O) vs "안녕하세요반갑습니다" (X - Overflow)
+**CRITICAL MANDATE: PIXEL-PERFECT ART PRESERVATION**
+*   **Do NOT Redraw:** You are strictly FORBIDDEN from altering characters, facial expressions, clothing, or background details.
+*   **Targeted Editing:** Apply changes **ONLY** to the pixels containing text (speech bubbles, sound effects).
+*   **Frozen Layer Rule:** Treat all non-text areas as a "locked layer" that must remain identical to the original image.
 
-# 2. LOCALIZATION & INPAINTING
-- **Reading Order:** Detect context from **Right-to-Left (RTL)**, but render text **Left-to-Right (LTR)**.
-- **Inpainting:** Completely erase original text. Reconstruct background/art seamlessly.
-- **Font Style:**
-  - Dialogue: Sans-serif (Gothic/Dotum). Clean & Readable.
-  - SFX: Redraw sound effects with Korean Onomatopoeia (Dynamic Brush Style).
+**CORE INSTRUCTIONS:**
 
-# 3. OUTPUT
-Return ONLY the processed image. Pixel-perfect preservation of character art is required.
+**1. Strict Reading Order (Right-to-Left Logic):**
+*   **Direction:** Japanese manga is read **Right-to-Left (RTL)**.
+*   **Sequence:** You MUST process and translate dialogue starting from the **Rightmost** bubble/panel to the **Leftmost**.
+*   **Logic Check:** Ensure the "Question" (Right) comes before the "Answer" (Left). Do not swap the conversation flow.
+
+**2. Visual Layout Rules (Must Follow):**
+*   **Rule A: HORIZONTAL Text Only (가로쓰기 강제):**
+    *   Convert ALL Korean dialogue to **Horizontal (Left-to-Right)** orientation.
+    *   **Prohibited:** Do NOT write Korean vertically (stacking characters top-to-bottom).
+    *   **Formatting:** Use line breaks to center the horizontal text block within vertical bubbles.
+*   **Rule B: Bubble Containment:**
+    *   Text must stay **strictly INSIDE** the white speech bubbles.
+    *   **Hallucination Check:** NEVER place translated text in empty background space or floating over artwork. If there is no bubble, do not add text (unless it's an SFX replacement).
+*   **Rule C: Inpainting & Cleaning:**
+    *   Completely **ERASE** the original Japanese text first. Fill the gap with the bubble color (usually white) or background pattern (screentone) seamlessly.
+    *   Do not write over existing text.
+
+**3. Translation & Localization:**
+*   **Context & Tone:** Analyze the visual context (angry, crying, laughing). Translate into natural Korean reflecting the character's persona (e.g., Slang/Informal vs. Polite/Honorifics).
+*   **Sound Effects (SFX):** Translate background SFX text. Match the "visual weight" (font size, thickness) of the original SFX, but ensure the background art behind it is preserved as much as possible.
+
+**4. Quality Assurance Checklist (Self-Correction):**
+*   [ ] Did I redraw the character's face? -> *Revert to original pixels.*
+*   [ ] Is there text floating in the air? -> *Delete it.*
+*   [ ] Is the Korean text vertical? -> *Change to Horizontal.*
+*   [ ] Is the dialogue order reversed? -> *Fix based on RTL rule.*
+
+**Output:**
+Return ONLY the final processed image.
 """
 
 # 감독관 프롬프트 (JSON 출력 강제)
@@ -636,5 +653,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
