@@ -39,9 +39,9 @@ except:
 # [모델 설정 변경] 요청하신 Gemini 3 Pro 및 Flash 적용
 # -------------------------------------------------------------------------
 # 작업자(Worker): 고성능 이미지 편집 및 추론용
-MODEL_WORKER = "gemini-3.0-pro-exp" 
+MODEL_WORKER = "gemini-3-pro-image-preview" 
 # 검수자(Inspector): 빠른 비전 인식 및 검수용
-MODEL_INSPECTOR = "gemini-3.0-flash-exp"
+MODEL_INSPECTOR = "gemini-3-flash-preview"
 # -------------------------------------------------------------------------
 
 # --- [2. 프롬프트 정의 (v3.0 Diamond Engine)] ---
@@ -454,3 +454,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
