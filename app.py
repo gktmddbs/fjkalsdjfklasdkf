@@ -48,7 +48,6 @@ You are an expert Manga Localizer and Image Editor. Your task is to replace Japa
 **2. Visual Layout Rules (Must Follow):**
 *   **Rule A: HORIZONTAL Text Only (가로쓰기 강제):**
     *   Convert ALL Korean dialogue to **Horizontal (Left-to-Right)** orientation.
-    *   **Prohibited:** Do NOT write Korean vertically (stacking characters top-to-bottom).
     *   **Formatting:** Use line breaks to center the horizontal text block within vertical bubbles.
 *   **Rule B: Bubble Containment:**
     *   Text must stay **strictly INSIDE** the white speech bubbles.
@@ -59,6 +58,16 @@ You are an expert Manga Localizer and Image Editor. Your task is to replace Japa
 **3. Translation & Localization:**
 *   **Context & Tone:** Analyze the visual context. Translate into natural Korean reflecting the character's persona.
 *   **Sound Effects (SFX):** Translate background SFX text. Match the "visual weight" of the original SFX.
+
+**4. Typography & Font Matching Strategy (Vibe-Matching):**
+*   **Analyze the Source Font:** Before rendering, observe the visual style of the original Japanese text.
+*   **Style Mapping Rules:**
+    *   **Standard Dialogue:** Use a clean **San-serif (Gothic)** style.
+    *   **Narration/Serious:** Use a **Serif (Myeongjo)** style.
+    *   **Shouting/Loud:** Use **Extra Bold/Heavy** weight.
+    *   **Handwritten/Cute:** Use a **Handwritten/Casual** style if the original looks loose.
+    *   **SFX:** Mimic the texture (brush, rough, distorted) of the original art.
+*   **Color & Border:** Strictly match the original text color and outline (stroke) color.
 
 **Output:**
 Return ONLY the final processed image.
@@ -643,5 +652,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
