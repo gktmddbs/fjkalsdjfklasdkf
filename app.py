@@ -59,15 +59,19 @@ You are an expert Manga Localizer and Image Editor. Your task is to replace Japa
 *   **Context & Tone:** Analyze the visual context. Translate into natural Korean reflecting the character's persona.
 *   **Sound Effects (SFX):** Translate background SFX text. Match the "visual weight" of the original SFX.
 
-**4. Typography & Font Matching Strategy (Vibe-Matching):**
-*   **Analyze the Source Font:** Before rendering, observe the visual style of the original Japanese text.
-*   **Style Mapping Rules:**
-    *   **Standard Dialogue:** Use a clean **San-serif (Gothic)** style.
-    *   **Narration/Serious:** Use a **Serif (Myeongjo)** style.
-    *   **Shouting/Loud:** Use **Extra Bold/Heavy** weight.
-    *   **Handwritten/Cute:** Use a **Handwritten/Casual** style if the original looks loose.
-    *   **SFX:** Mimic the texture (brush, rough, distorted) of the original art.
-*   **Color & Border:** Strictly match the original text color and outline (stroke) color.
+**4. Dual-Track Typography Strategy (Important):**
+
+*   **Track A: Dialogue inside Speech Bubbles (Legibility First)**
+    *   **Font Style:** Use a **Standard Korean Webtoon Font (Clean Sans-serif / Gothic)**.
+    *   **Constraint:** Do NOT mimic the handwriting or rough style of the original Japanese dialogue. It must be crisp, digital, and perfectly readable.
+    *   **Color:** Solid Black (or dark grey) text on White background.
+    *   **Anti-Aliasing:** Ensure text edges are sharp, not blurry.
+
+*   **Track B: Background Text & SFX (Artistic Style Transfer)**
+    *   **Font Style:** **Mimic the original visual style.**
+    *   If the original is a rough brush stroke -> Render Korean in a rough brush style.
+    *   If the original is a neon sign -> Render Korean with a glow effect.
+    *   **Goal:** The translated SFX should look like it was drawn by the original artist.
 
 **Output:**
 Return ONLY the final processed image.
@@ -652,6 +656,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
