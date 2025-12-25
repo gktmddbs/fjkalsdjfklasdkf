@@ -373,7 +373,7 @@ def render_sidebar():
         
         resolution = st.radio(
             "해상도 (Resolution)", 
-            options=["1K", "2K", "4K"], 
+            options=["2K", "1K", "4K"], 
             index=0, 
             horizontal=True,
             help="4K가 가장 선명하지만, 세로쓰기 편향이 심할 땐 2K가 더 말을 잘 들을 수 있습니다."
@@ -390,7 +390,7 @@ def render_sidebar():
 
         st.divider()
         st.subheader("⚙️ 옵션")
-        use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=True, help="세로쓰기가 감지되면 자동으로 설정을 바꿔서 다시 시도합니다.")
+        use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=False, help="세로쓰기가 감지되면 자동으로 설정을 바꿔서 다시 시도합니다.")
         
         if st.button("🗑️ 초기화", use_container_width=True): clear_all_data()
         
@@ -653,6 +653,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
