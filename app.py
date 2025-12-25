@@ -1,7 +1,7 @@
 import streamlit as st
 from google import genai
 from google.genai import types
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import os
 import time
@@ -13,22 +13,23 @@ import json
 from streamlit_paste_button import paste_image_button
 from streamlit_image_comparison import image_comparison
 
-# --- [1. 기본 설정 및 디렉토리 관리] ---
+# --- [1. 기본 설정 및 상수] ---
 st.set_page_config(page_title="Nano Banana (Webtoon Engine)", page_icon="🍌", layout="wide")
 
+# API 키 로드 (Secrets 또는 환경변수)
 try:
     DEFAULT_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
     DEFAULT_API_KEY = ""
 
 # 모델 설정
-MODEL_WORKER = "gemini-3-pro-image-preview"
-MODEL_INSPECTOR = "gemini-3-flash-preview"
+MODEL_WORKER = "gemini-2.0-flash-exp" # 혹은 "gemini-1.5-pro" 등 사용 가능한 최신 모델
+MODEL_INSPECTOR = "gemini-2.0-flash-exp" # 빠르고 저렴한 모델 권장
 
-# --- [2. 프롬프트 엔지니어링 (CSS/Webtoon 전략)] ---
+# --- [2. 프롬프트 정의] ---
 
-# 작업자 프롬프트 (웹툰 스타일 + CSS 메타포)
-DEFAULT_PROMPT = """
+# 작업자(Worker) 프롬프트: CSS 메타포와 강력한 제약사항 포함
+WORKER_PROMPT = """
 **Role & Objective:**
 You are an expert Manga Localizer and Image Editor. Your task is to replace Japanese text with Korean text in the provided manga image. You must deliver a high-quality, read-to-read Korean version while **strictly preserving** the original artwork outside of text areas.
 
@@ -51,69 +52,107 @@ You are an expert Manga Localizer and Image Editor. Your task is to replace Japa
     *   **Formatting:** Use line breaks to center the horizontal text block within vertical bubbles.
 *   **Rule B: Bubble Containment:**
     *   Text must stay **strictly INSIDE** the white speech bubbles.
-    *   **Hallucination Check:** NEVER place translated text in empty background space or floating over artwork. If there is no bubble, do not add text (unless it's an SFX replacement).
+    *   **Hallucination Check:** NEVER place translated text in empty background space or floating over artwork.
 *   **Rule C: Inpainting & Cleaning:**
     *   Completely **ERASE** the original Japanese text first. Fill the gap with the bubble color (usually white) or background pattern (screentone) seamlessly.
-    *   Do not write over existing text.
 
 **3. Translation & Localization:**
-*   **Context & Tone:** Analyze the visual context (angry, crying, laughing). Translate into natural Korean reflecting the character's persona (e.g., Slang/Informal vs. Polite/Honorifics).
-*   **Sound Effects (SFX):** Translate background SFX text. Match the "visual weight" (font size, thickness) of the original SFX, but ensure the background art behind it is preserved as much as possible.
-
-**4. Quality Assurance Checklist (Self-Correction):**
-*   [ ] Did I redraw the character's face? -> *Revert to original pixels.*
-*   [ ] Is there text floating in the air? -> *Delete it.*
-*   [ ] Is the Korean text vertical? -> *Change to Horizontal.*
-*   [ ] Is the dialogue order reversed? -> *Fix based on RTL rule.*
+*   **Context & Tone:** Analyze the visual context. Translate into natural Korean reflecting the character's persona.
+*   **Sound Effects (SFX):** Translate background SFX text. Match the "visual weight" of the original SFX.
 
 **Output:**
 Return ONLY the final processed image.
 """
 
-# 감독관 프롬프트 (JSON 출력 강제)
-INSPECTOR_PROMPT = """
+# 검수자(Inspector) 프롬프트 - 레벨 2 (기본)
+INSPECTOR_PROMPT_BASIC = """
 # Role
-You are a QA Supervisor for Korean Webtoon Localization.
+You are a Visual Quality Assurance Supervisor.
 
 # Task
-Inspect the [Generated Image] for CRITICAL FAILURES based on the [Original Image].
+Compare the [Generated Image] with the [Original Image] to detect HALLUCINATIONS or DESTRUCTION.
 
-# PASS/FAIL CRITERIA (Strict but Nuanced)
+# PASS Criteria (Broad):
+1. **Composition:** Does the output look like the same page? (Layout, Panels).
+2. **Art Integrity:** Are the characters' faces intact? (Not melted/blurred/scary).
+3. **Text Placement:** Is text roughly inside bubbles?
 
-1. **Vertical Text Policy (Conditional):**
-   - **FAIL (Reject):** If you see **Multi-column Vertical Dialogue** (Traditional Japanese style where text is read Right-to-Left in vertical columns). This breaks Webtoon readability.
-   - **PASS (Accept):** If the vertical text is **Sound Effects (SFX)** (e.g., "쾅", "콰아앙").
-   - **PASS (Accept):** If it is a **Single Vertical Line** (e.g., a shout, a sign, or a short exclamation like "?!").
-   - **Summary:** Only reject "Block-paragraph vertical text". Stylistic vertical text is allowed.
-
-2. **Text Overflow:** Is text touching the speech bubble borders or cut off? -> FAIL.
-3. **Language:** Is there untranslated Japanese text remaining? -> FAIL.
-4. **Distortion:** Is the main character's face melted, blurry, or scary? -> FAIL.
+# IGNORE:
+- Do NOT check for vertical/horizontal text direction.
+- Do NOT check for translation accuracy.
 
 # Output Format (JSON ONLY)
-Return a single JSON object. Do not explain textually.
 If PASS: {"status": "PASS"}
-If FAIL: {"status": "FAIL", "reason": "Multi-column vertical dialogue detected"}
+If FAIL (Face melted / Totally different image): {"status": "FAIL", "reason": "Severe visual distortion detected"}
 """
 
-# --- [3. 유틸리티 (클라우드 안전 버전)] ---
+# 검수자(Inspector) 프롬프트 - 레벨 3 (엄격)
+INSPECTOR_PROMPT_STRICT = """
+# Role
+You are a Strict Localization QA Supervisor.
+
+# Task
+Inspect the [Generated Image] for TEXT FORMATTING and TRANSLATION failures.
+
+# FAIL CRITERIA (Strict):
+
+1. **Vertical Text (CRITICAL):**
+   - **FAIL:** If you see any **Korean text written vertically** (stacked top-to-bottom) with 2 or more characters.
+   - **PASS:** Single character vertical exclamations (e.g., "!", "?") or vertical SFX are OK.
+   
+2. **Untranslated Text:**
+   - **FAIL:** If Japanese Kana/Kanji is still visible inside speech bubbles.
+
+3. **Visual Integrity:**
+   - **FAIL:** If the character's face is distorted.
+
+# Output Format (JSON ONLY)
+If PASS: {"status": "PASS"}
+If FAIL: {"status": "FAIL", "reason": "Vertical text or Untranslated Japanese detected"}
+"""
+
+# --- [3. 유틸리티 함수] ---
+
+@st.cache_resource
+def get_genai_client(api_key):
+    return genai.Client(api_key=api_key)
 
 def save_image_to_temp(image: Image.Image, filename: str) -> str:
-    """시스템 임시 폴더에 저장 (권한 문제 해결)"""
     temp_dir = tempfile.gettempdir()
+    # 파일명 안전 처리
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
     path = os.path.join(temp_dir, safe_name)
     image.save(path, format="PNG")
     return path
 
-def load_image_from_path(path: str) -> Image.Image:
-    """경로에서 이미지를 로드"""
-    if path and os.path.exists(path):
-        try:
-            return Image.open(path)
-        except:
-            return None
-    return None
+def load_image_optimized(path_or_file) -> Image.Image:
+    """이미지 로드 시 회전 보정 및 RGB 변환"""
+    try:
+        if isinstance(path_or_file, str):
+            if not os.path.exists(path_or_file): return None
+            img = Image.open(path_or_file)
+        else:
+            img = Image.open(path_or_file)
+            
+        img = ImageOps.exif_transpose(img) # EXIF 회전 정보 반영
+        
+        # 투명도(Alpha)가 있는 경우 흰색 배경으로 병합 (JPG/API 호환성)
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[3])
+            return background
+        else:
+            return img.convert("RGB")
+    except Exception as e:
+        st.error(f"이미지 로드 실패: {e}")
+        return None
+
+def image_to_bytes(image: Image.Image) -> bytes:
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='PNG')
+    return img_byte_arr.getvalue()
 
 def init_session_state():
     defaults = {
@@ -126,53 +165,40 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state: st.session_state[key] = value
 
-def clear_all_data():
-    """내 세션 데이터만 초기화"""
-    st.session_state.job_queue = []
-    st.session_state.results = []
-    st.rerun()
-
-def get_image_hash(image: Image.Image) -> str:
-    img_byte_arr = io.BytesIO()
-    image.save(img_byte_arr, format='PNG')
-    return hashlib.md5(img_byte_arr.getvalue()).hexdigest()
-
-def image_to_bytes(image: Image.Image) -> bytes:
-    img_byte_arr = io.BytesIO()
-    image.save(img_byte_arr, format='PNG')
-    return img_byte_arr.getvalue()
-
 def create_zip_file():
-    """디스크에 저장된 결과물을 ZIP으로 압축"""
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         for item in st.session_state.results:
-            img = load_image_from_path(item['result_path']) 
+            img = load_image_optimized(item['result_path']) 
             if img:
                 img_bytes = io.BytesIO()
                 img.save(img_bytes, format='PNG')
-                filename = f"kor_{item['name']}"
-                if not filename.lower().endswith('.png'): filename = os.path.splitext(filename)[0] + ".png"
+                
+                # 파일명 정리
+                base_name = item['name']
+                if base_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    base_name = os.path.splitext(base_name)[0]
+                
+                filename = f"kor_{base_name}.png"
                 zip_file.writestr(filename, img_bytes.getvalue())
     return zip_buffer.getvalue()
 
-@st.dialog("📷 이미지 전체 화면", width="large")
-def show_full_image(image_path, caption):
-    img = load_image_from_path(image_path)
-    if img:
-        st.image(img, caption=caption, use_container_width=True)
-    else:
-        st.error("이미지를 찾을 수 없습니다.")
-
 # --- [4. AI 로직 (핵심 엔진)] ---
 
-def verify_image(api_key, original_img, generated_img):
-    """JSON 모드로 검수"""
+def verify_image(api_key, original_img, generated_img, mode):
+    """
+    mode: "OFF" | "BASIC" | "STRICT"
+    """
+    if mode == "OFF":
+        return True, "Skipped (User Request)"
+
+    target_prompt = INSPECTOR_PROMPT_STRICT if mode == "STRICT" else INSPECTOR_PROMPT_BASIC
+
     try:
-        client = genai.Client(api_key=api_key)
+        client = get_genai_client(api_key)
         
         contents = [
-            INSPECTOR_PROMPT,
+            target_prompt,
             "Here is the ORIGINAL image:",
             types.Part.from_bytes(data=image_to_bytes(original_img), mime_type="image/png"),
             "Here is the GENERATED result:",
@@ -183,165 +209,165 @@ def verify_image(api_key, original_img, generated_img):
             model=MODEL_INSPECTOR,
             contents=contents,
             config=types.GenerateContentConfig(
-                temperature=0.1, # 검수는 냉철하게
+                temperature=0.0, # 검수는 냉철하게
                 response_mime_type="application/json"
             )
         )
         
         if response.text:
             try:
-                data = json.loads(response.text)
+                # JSON 파싱 시도 (가끔 마크다운 ```json ... ``` 으로 감싸서 줄 때 대응)
+                clean_text = response.text.strip()
+                if clean_text.startswith("```json"):
+                    clean_text = clean_text[7:-3]
+                elif clean_text.startswith("```"):
+                    clean_text = clean_text[3:-3]
+                
+                data = json.loads(clean_text)
+                
                 if data.get("status") == "PASS":
                     return True, "PASS"
                 else:
-                    return False, data.get("reason", "Unknown Failure")
+                    return False, data.get("reason", "Unknown Rejection")
             except json.JSONDecodeError:
-                return True, "Inspector JSON Error (Skipped)"
-        return True, "No Response (Skipped)"
+                # JSON 파싱 실패하면 그냥 통과시킴 (작업 중단 방지)
+                return True, "JSON Error (Pass)"
+        return True, "No Response (Pass)"
         
     except Exception as e:
-        return True, f"Inspector Error: {e} (Skipped)"
+        return True, f"Inspector Error: {e} (Pass)"
 
-def generate_with_auto_fix(api_key, prompt, image_input, resolution, temperature, max_retries=2, status_container=None):
-    """
-    [핵심] 세로쓰기 방지 알고리즘 적용
-    - CSS 메타포 사용
-    - Temperature 동적 보정
-    - 재시도 시 강력한 경고 주입
-    """
-    client = genai.Client(api_key=api_key)
+def generate_with_auto_fix(api_key, prompt, image_input, resolution, temperature, verify_mode, max_retries=2, status_container=None):
+    client = get_genai_client(api_key)
     target_bytes = image_to_bytes(image_input)
     last_error = ""
 
+    # 안전 설정 (차단 최소화)
+    safety_settings = [
+        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+    ]
+
     for attempt in range(max_retries + 1):
         try:
-            # 1. Temperature 동적 보정 (Dynamic Adjustment)
-            # 재시도인데 Temperature가 너무 낮으면, 편향을 깨기 위해 0.6으로 강제 상향
+            # 1. Temperature 동적 보정
             current_temp = temperature
+            # 재시도 중이고, 기존 Temp가 낮았다면 높여서 편향 깨기
             if attempt > 0 and temperature < 0.5:
-                current_temp = 0.6
-                if status_container: status_container.write(f"🔥 **재시도 전략 변경:** 창의성을 {current_temp}로 높여 고정관념을 깹니다.")
-
-            if status_container:
-                retry_msg = f" (시도 {attempt+1})" if attempt > 0 else ""
-                status_container.write(f"🎨 **이미지 생성 중...** {retry_msg} | Res: {resolution} | Temp: {current_temp}")
+                current_temp = 0.65
+                if status_container: status_container.warning(f"🔥 전략 변경: 창의성을 {current_temp}로 높여 재시도합니다.")
 
             # 2. 프롬프트 강화 (CSS Injection)
             css_instruction = (
                 "\n# TECHNICAL OVERRIDE:\n"
                 "Apply CSS: `writing-mode: horizontal-tb !important;`\n"
                 "If bubbles are narrow, FORCE line breaks every 2-3 chars.\n"
-                "DO NOT respect the original bubble shape if it implies vertical text.\n"
             )
             
-            # 재시도 시 비명 지르기
             retry_instruction = ""
             if attempt > 0 and last_error:
                 retry_instruction = (
-                    f"\n🚨 **PREVIOUS ERROR: {last_error}** 🚨\n"
-                    "You generated VERTICAL text. This is a FATAL ERROR.\n"
-                    "SWITCH TO 'WEBTOON MODE'. Use SHORT, HORIZONTAL lines only.\n"
+                    f"\n🚨 **PREVIOUS REJECTION REASON: {last_error}** 🚨\n"
+                    "You failed the Quality Assurance check.\n"
+                    "If the error was 'Vertical Text', force Horizontal text output.\n"
+                    "If the error was 'Distortion', preserve the original art strictly.\n"
                 )
 
-            # 3. 콘텐츠 구성 (이미지 -> 텍스트 순서가 제어에 더 효과적일 수 있음)
+            # 3. API 호출
             contents = [
                 prompt + css_instruction + retry_instruction,
                 "Process this image:",
-                types.Part.from_bytes(data=target_bytes, mime_type="image/png"),
-                "REMEMBER: HORIZONTAL TEXT ONLY."
+                types.Part.from_bytes(data=target_bytes, mime_type="image/png")
             ]
 
-            # 4. Config & Safety
-            config = types.GenerateContentConfig(
-                temperature=current_temp,
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(image_size=resolution),
-                safety_settings=[
-                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                ]
-            )
-
-            # 5. 실행
             response = client.models.generate_content(
                 model=MODEL_WORKER,
                 contents=contents,
-                config=config
+                config=types.GenerateContentConfig(
+                    temperature=current_temp,
+                    safety_settings=safety_settings
+                )
             )
             
-            # 6. 결과 파싱 및 Safety Check
+            # 4. 결과 추출
             result_img = None
             
-            # (디버깅) 차단 여부 확인
+            # Safety Block 확인
             if response.candidates:
-                candidate = response.candidates[0]
-                if candidate.finish_reason and candidate.finish_reason != "STOP":
-                    msg = f"Google Safety Filter 차단 ({candidate.finish_reason})"
-                    if status_container: status_container.write(f"🚫 {msg}")
-                    return None, msg
+                finish_reason = response.candidates[0].finish_reason
+                if finish_reason != "STOP":
+                    fail_msg = f"⚠️ Safety Filter Blocked: {finish_reason}"
+                    if status_container: status_container.error(fail_msg)
+                    return None, fail_msg
 
             if response.parts:
                 for part in response.parts:
                     if part.inline_data: 
                         result_img = Image.open(io.BytesIO(part.inline_data.data))
-                    elif hasattr(part, 'image') and part.image: 
-                        result_img = part.image
+                        break
             
+            # SDK 버전에 따른 호환성
             if not result_img and hasattr(response, 'image') and response.image: 
                 result_img = response.image
 
             if not result_img:
-                if status_container: status_container.write("❌ 빈 결과 반환 (서버 오류 또는 필터)")
-                return None, "이미지 생성 실패"
+                # 텍스트만 뱉고 이미지를 안 준 경우
+                if status_container: status_container.error("❌ 이미지가 생성되지 않았습니다. (모델이 텍스트로 응답함)")
+                return None, "No Image Generated"
 
-            # 7. 검수 (Inspector)
+            # 5. 검수 (Inspector)
             if attempt < max_retries:
-                if status_container: status_container.write(f"🧐 **품질 검수 중...**")
+                if status_container: status_container.info(f"🧐 품질 검수 중... (Mode: {verify_mode})")
                 
-                is_pass, reason = verify_image(api_key, image_input, result_img)
+                is_pass, reason = verify_image(api_key, image_input, result_img, verify_mode)
+                
                 if is_pass:
-                    if status_container: status_container.write("✅ 검수 통과!")
+                    if status_container: status_container.success("✅ 검수 통과!")
                     return result_img, None 
                 else:
                     last_error = reason
-                    if status_container: status_container.write(f"🚨 **검수 불합격**: {reason} -> 전략 수정 후 재시도...")
+                    if status_container: status_container.warning(f"🚨 불합격: {reason} -> 재시도 중...")
                     time.sleep(1.0)
                     continue
             else:
-                if status_container: status_container.write("⚠️ 최대 재시도 횟수 도달. 현재 결과를 반환합니다.")
-                return result_img, "최종 시도 완료 (검수 미통과 포함)"
+                if status_container: status_container.warning("⚠️ 최대 재시도 횟수 도달. 현재 결과를 반환합니다.")
+                return result_img, "Max Retries Reached"
 
         except Exception as e:
-            if status_container: status_container.write(f"🔥 에러 발생: {str(e)}")
-            return None, f"API 에러 발생: {str(e)}"
+            if "429" in str(e):
+                if status_container: status_container.warning("⏳ API 사용량 제한. 5초 대기...")
+                time.sleep(5)
+                continue
+            return None, f"API Error: {str(e)}"
             
-    return None, "재시도 횟수를 초과했습니다."
+    return None, "Unknown Error"
 
-def process_and_update(item, api_key, prompt, resolution, temperature, use_autofix):
-    """단일 실행 처리"""
-    original_img = load_image_from_path(item['image_path'])
+# --- [5. 메인 처리 로직] ---
+
+def process_and_update(item, api_key, prompt, resolution, temperature, use_autofix, verify_mode):
+    original_img = load_image_optimized(item['image_path'])
     if not original_img:
         st.error("원본 이미지가 만료되었습니다. 다시 업로드해주세요.")
         return
 
+    # Auto-fix 옵션이 꺼져있거나 검수가 OFF면 재시도 횟수 0
+    max_retries = 2 if (use_autofix and verify_mode != "OFF") else 0
+    
     start_time = time.time()
     
     with st.status(f"🚀 **{item['name']}** 작업 시작...", expanded=True) as status:
-        if use_autofix:
-            res_img, err = generate_with_auto_fix(api_key, prompt, original_img, resolution, temperature, status_container=status)
-        else:
-            # Auto-fix 끄면 재시도 0회
-            res_img, err = generate_with_auto_fix(api_key, prompt, original_img, resolution, temperature, max_retries=0, status_container=status)
+        res_img, err = generate_with_auto_fix(
+            api_key, prompt, original_img, resolution, temperature, 
+            verify_mode, max_retries, status_container=status
+        )
 
-        end_time = time.time()
-        duration = end_time - start_time
+        duration = time.time() - start_time
 
         if res_img:
             res_path = save_image_to_temp(res_img, f"result_{item['name']}")
-            
-            status.update(label=f"✅ 작업 완료! ({duration:.2f}초)", state="complete", expanded=False)
+            status.update(label=f"✅ 완료! ({duration:.2f}초)", state="complete", expanded=False)
             
             st.session_state.results.append({
                 'id': str(uuid.uuid4()), 
@@ -350,8 +376,9 @@ def process_and_update(item, api_key, prompt, resolution, temperature, use_autof
                 'result_path': res_path,
                 'duration': duration
             })
+            # 대기열에서 제거
             st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
-            time.sleep(1) 
+            time.sleep(0.5)
             st.rerun()
         else:
             status.update(label="❌ 작업 실패", state="error", expanded=True)
@@ -359,132 +386,160 @@ def process_and_update(item, api_key, prompt, resolution, temperature, use_autof
             item['error_msg'] = err
             st.rerun()
 
-# --- [5. UI 컴포넌트] ---
+def auto_process_step(api_key, prompt, resolution, temperature, use_autofix, verify_mode):
+    if not st.session_state.is_auto_running: return
+    pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
+    
+    if not pending:
+        st.session_state.is_auto_running = False
+        st.toast("✅ 모든 작업이 완료되었습니다!")
+        time.sleep(1)
+        st.rerun()
+        return
+
+    item = pending[0]
+    # 위와 동일한 로직이지만 자동 실행용
+    process_and_update(item, api_key, prompt, resolution, temperature, use_autofix, verify_mode)
+
+
+# --- [6. UI 컴포넌트] ---
+
 def render_sidebar():
     with st.sidebar:
         st.title("🍌 Nano Banana")
-        st.caption("Webtoon Engine (Anti-Vertical)")
-        api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
+        st.caption("Webtoon Engine v2.0")
         
-        st.info(f"🛠️ 작업자: {MODEL_WORKER}\n👮 감독관: {MODEL_INSPECTOR}")
+        api_key = st.text_input("Google API Key", value=DEFAULT_API_KEY, type="password")
+        if not api_key:
+            st.warning("API 키를 입력하세요.")
+        
+        st.info(f"🛠️ Worker: {MODEL_WORKER}\n👮 Inspector: {MODEL_INSPECTOR}")
 
         st.divider()
         st.subheader("⚙️ 모델 설정")
         
-        resolution = st.radio(
-            "해상도 (Resolution)", 
-            options=["2K", "1K", "4K"], 
-            index=0, 
-            horizontal=True,
-            help="4K가 가장 선명하지만, 세로쓰기 편향이 심할 땐 2K가 더 말을 잘 들을 수 있습니다."
-        )
+        # 해상도 (참고: API 버전에 따라 image_size가 무시될 수 있음)
+        resolution = st.radio("해상도", options=["2K", "1K"], index=0, horizontal=True)
+        res_tuple = (2048, 2048) if resolution == "2K" else (1024, 1024)
 
-        temperature = st.slider(
-            "창의성 (Temperature)", 
-            min_value=0.0, 
-            max_value=1.0, 
-            value=0.5, 
-            step=0.1,
-            help="기본값 0.5 권장. 재시도 시 자동으로 0.6으로 보정됩니다."
-        )
+        temperature = st.slider("창의성 (Temperature)", 0.0, 1.0, 0.4, 0.1, help="낮을수록 원본 보존력이 좋지만, 0.0은 때로 번역을 거부할 수 있습니다.")
 
         st.divider()
-        st.subheader("⚙️ 옵션")
-        use_autofix = st.toggle("🛡️ 자동 검수 & 재생성", value=False, help="세로쓰기가 감지되면 자동으로 설정을 바꿔서 다시 시도합니다.")
+        st.subheader("🧐 검수 옵션 (Inspector)")
         
-        if st.button("🗑️ 초기화", use_container_width=True): clear_all_data()
+        inspector_option = st.radio(
+            "검수 수준 선택",
+            options=["1. 검수 안 함 (빠름)", "2. 기본 (이미지 깨짐 방지)", "3. 엄격 (세로쓰기/미번역 잡기)"],
+            index=1
+        )
         
-        st.divider()
-        use_slider = st.toggle("비교 슬라이더", value=True)
-        with st.expander("📝 프롬프트 수정"):
-            prompt = st.text_area("작업 지시사항", value=DEFAULT_PROMPT, height=400)
+        if "1." in inspector_option: verify_mode = "OFF"
+        elif "3." in inspector_option: verify_mode = "STRICT"
+        else: verify_mode = "BASIC"
+
+        use_autofix = st.toggle("🛡️ 자동 재시도 (Auto-Retry)", value=True, help="검수 실패 시 자동으로 설정을 변경하여 다시 시도합니다.")
+        
+        if st.button("🗑️ 모든 데이터 초기화", use_container_width=True):
+            st.session_state.job_queue = []
+            st.session_state.results = []
+            st.rerun()
             
-        return api_key, use_slider, prompt, resolution, temperature, use_autofix
+        st.divider()
+        use_slider = st.toggle("비교 슬라이더 켜기", value=True)
+        with st.expander("📝 프롬프트 수정"):
+            prompt = st.text_area("System Instructions", value=WORKER_PROMPT, height=300)
+
+        return api_key, use_slider, prompt, res_tuple, temperature, use_autofix, verify_mode
 
 def handle_file_upload():
     col1, col2 = st.columns([3, 1])
-    with col1: files = st.file_uploader("이미지 추가", type=['png', 'jpg', 'zip'], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
+    with col1: 
+        files = st.file_uploader("이미지 추가", type=['png', 'jpg', 'jpeg', 'zip'], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
     with col2:
         st.write("클립보드:")
         paste_btn = paste_image_button(label="📋 붙여넣기", text_color="#ffffff", background_color="#FF4B4B", hover_background_color="#FF0000")
 
+    new_cnt = 0
+    # 파일 업로드 처리
     if files:
-        new_cnt = 0
-        with st.spinner("파일 저장 중..."):
+        with st.spinner("파일 처리 중..."):
             for f in files:
                 if f.name.lower().endswith('.zip'):
                     try:
                         with zipfile.ZipFile(f) as z:
-                            img_files = [n for n in z.namelist() if n.lower().endswith(('.png','.jpg')) and '__MACOSX' not in n]
+                            img_files = [n for n in z.namelist() if n.lower().endswith(('.png','.jpg','.jpeg')) and '__MACOSX' not in n]
                             for fname in img_files:
                                 with z.open(fname) as img_f:
-                                    img = Image.open(io.BytesIO(img_f.read()))
-                                    path = save_image_to_temp(img, os.path.basename(fname))
-                                    st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': os.path.basename(fname), 'image_path': path, 'status': 'pending', 'error_msg': None})
-                                    new_cnt += 1
+                                    img = load_image_optimized(io.BytesIO(img_f.read()))
+                                    if img:
+                                        path = save_image_to_temp(img, os.path.basename(fname))
+                                        st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': os.path.basename(fname), 'image_path': path, 'status': 'pending', 'error_msg': None})
+                                        new_cnt += 1
                     except: pass
                 else:
-                    try:
-                        img = Image.open(f)
+                    img = load_image_optimized(f)
+                    if img:
                         path = save_image_to_temp(img, f.name)
                         st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f.name, 'image_path': path, 'status': 'pending', 'error_msg': None})
                         new_cnt += 1
-                    except: pass
-            if new_cnt > 0:
-                time.sleep(0.5)
-                st.session_state.uploader_key += 1
-                st.rerun()
-
+    
+    # 붙여넣기 처리
     if paste_btn.image_data:
-        curr_hash = get_image_hash(paste_btn.image_data)
+        curr_hash = hashlib.md5(io.BytesIO(paste_btn.image_data_bytes).getvalue()).hexdigest()
         if st.session_state.last_pasted_hash != curr_hash:
-            path = save_image_to_temp(paste_btn.image_data, f"paste_{int(time.time())}.png")
-            st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f"paste_{int(time.time())}.png", 'image_path': path, 'status': 'pending', 'error_msg': None})
-            st.session_state.last_pasted_hash = curr_hash
-            st.rerun()
+            img = load_image_optimized(io.BytesIO(paste_btn.image_data_bytes))
+            if img:
+                path = save_image_to_temp(img, f"paste_{int(time.time())}.png")
+                st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f"paste_{int(time.time())}.png", 'image_path': path, 'status': 'pending', 'error_msg': None})
+                st.session_state.last_pasted_hash = curr_hash
+                new_cnt += 1
 
-def render_queue(api_key, prompt, resolution, temperature, use_autofix):
+    if new_cnt > 0:
+        time.sleep(0.5)
+        st.session_state.uploader_key += 1
+        st.rerun()
+
+def render_queue(api_key, prompt, resolution, temperature, use_autofix, verify_mode):
     if not st.session_state.job_queue: return
 
     st.divider()
     c1, c2, c3 = st.columns([3, 1, 1])
     pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
-    c1.subheader(f"📂 대기열 ({len(st.session_state.job_queue)}장)")
+    c1.subheader(f"📂 대기열 ({len(st.session_state.job_queue)}장 / 대기 {len(pending)}장)")
     
     if not st.session_state.is_auto_running:
         if c2.button(f"🚀 전체 실행", type="primary", use_container_width=True, disabled=len(pending)==0):
             st.session_state.is_auto_running = True
             st.rerun()
     else:
-        if c2.button("⏹️ 중지", type="secondary"):
+        if c2.button("⏹️ 중지", type="secondary", use_container_width=True):
             st.session_state.is_auto_running = False
             st.rerun()
 
-    if c3.button("🗑️ 선택 삭제"):
+    if c3.button("🗑️ 선택 삭제", use_container_width=True):
         st.session_state.job_queue = []
         st.rerun()
 
     if st.session_state.is_auto_running: st.progress(100, text="🔄 자동 작업 중...")
 
+    # 대기열 리스트 표시
     for item in st.session_state.job_queue:
         with st.container(border=True):
             col_img, col_info = st.columns([1, 4])
             with col_img:
-                img = load_image_from_path(item['image_path'])
-                if img:
-                    st.image(img, use_container_width=True)
-                    if st.button("🔍 확대", key=f"zoom_q_{item['id']}"): show_full_image(item['image_path'], item['name'])
-                else:
-                    st.error("이미지 유실됨")
-
+                img = load_image_optimized(item['image_path'])
+                if img: st.image(img, use_container_width=True)
             with col_info:
-                st.markdown(f"**📄 {item['name']}**")
-                if item['status'] == 'error': st.error(f"❌ {item['error_msg']}")
-                elif item['status'] == 'pending': st.info("⏳ 대기 중")
+                st.markdown(f"**{item['name']}**")
+                if item['status'] == 'error': 
+                    st.error(f"❌ {item['error_msg']}")
+                elif item['status'] == 'pending': 
+                    st.info("⏳ 대기 중")
                 
-                b1, b2, b3 = st.columns([1, 1, 3])
-                if b1.button("▶️ 실행", key=f"run_{item['id']}"): process_and_update(item, api_key, prompt, resolution, temperature, use_autofix)
-                if b2.button("🗑️ 삭제", key=f"del_{item['id']}"):
+                b1, b2 = st.columns([1, 4])
+                if b1.button("▶️", key=f"run_{item['id']}"): 
+                    process_and_update(item, api_key, prompt, resolution, temperature, use_autofix, verify_mode)
+                if b2.button("🗑️", key=f"del_{item['id']}"):
                     st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
                     st.rerun()
 
@@ -494,166 +549,86 @@ def render_results(use_slider):
     st.divider()
     st.subheader(f"🖼️ 완료된 작업 ({len(st.session_state.results)}장)")
 
-    # --- [NEW] 저장 옵션 패널 ---
+    # 저장 패널
     with st.container(border=True):
-        st.markdown("### 💾 저장 옵션")
-        c1, c2 = st.columns([1, 1])
+        st.markdown("### 💾 결과물 저장")
+        c1, c2 = st.columns(2)
+        zip_name = c1.text_input("ZIP 파일명", value="translated_manga")
+        local_path = c2.text_input("로컬 폴더 경로 (Optional)", placeholder="예: C:/Manga/Chapter1")
         
-        # 1. ZIP 파일명 설정
-        zip_name = c1.text_input("ZIP 파일 이름 설정", value="translated_manga", help="확장자(.zip)는 자동으로 붙습니다.")
+        b1, b2, b3 = st.columns(3)
         
-        # 2. 로컬 경로 설정 (PC에서 실행 중일 때만 작동)
-        local_path = c2.text_input("PC 폴더로 직접 저장 (로컬 실행 시)", placeholder="예: C:/Manga/Chapter1", help="Streamlit을 내 컴퓨터에서 실행 중일 때만 작동합니다.")
-
-        b1, b2, b3 = st.columns([1, 1, 1])
-        
-        # [기능 1] ZIP 다운로드
+        # ZIP 다운로드
         zip_data = create_zip_file()
-        b1.download_button(
-            label="📦 ZIP으로 다운로드",
-            data=zip_data,
-            file_name=f"{zip_name}.zip",
-            mime="application/zip",
-            use_container_width=True,
-            type="primary"
-        )
+        b1.download_button("📦 ZIP 다운로드", data=zip_data, file_name=f"{zip_name}.zip", mime="application/zip", use_container_width=True, type="primary")
 
-        # [기능 2] 로컬 폴더로 내보내기
-        if b2.button("📂 PC 폴더에 저장", use_container_width=True):
-            if not local_path:
-                st.warning("경로를 입력해주세요.")
+        # 로컬 저장
+        if b2.button("📂 PC 저장", use_container_width=True):
+            if local_path and os.path.exists(local_path):
+                cnt = 0
+                for item in st.session_state.results:
+                    img = load_image_optimized(item['result_path'])
+                    if img:
+                        fname = f"kor_{item['name']}"
+                        if not fname.lower().endswith('.png'): fname += ".png"
+                        img.save(os.path.join(local_path, fname))
+                        cnt += 1
+                st.success(f"{cnt}장 저장 완료!")
             else:
-                try:
-                    os.makedirs(local_path, exist_ok=True)
-                    saved_count = 0
-                    for item in st.session_state.results:
-                        # 파일명 정리
-                        safe_fname = f"kor_{item['name']}"
-                        if not safe_fname.lower().endswith('.png'): 
-                            safe_fname = os.path.splitext(safe_fname)[0] + ".png"
-                        
-                        save_full_path = os.path.join(local_path, safe_fname)
-                        
-                        # 이미지 로드 및 저장
-                        img = load_image_from_path(item['result_path'])
-                        if img:
-                            img.save(save_full_path, format="PNG")
-                            saved_count += 1
-                    
-                    st.success(f"✅ 저장 완료! ({saved_count}장) -> {local_path}")
-                except Exception as e:
-                    st.error(f"저장 실패: {e} (권한 문제거나 경로가 잘못되었습니다.)")
-
-        # [기능 3] 목록 비우기
-        if b3.button("🗑️ 목록 비우기", use_container_width=True):
+                st.error("유효하지 않은 경로입니다.")
+        
+        if b3.button("🗑️ 결과 비우기", use_container_width=True):
             st.session_state.results = []
             st.rerun()
 
-    st.divider()
-    
-    # 결과물 리스트 표시
+    # 결과 리스트
     for item in st.session_state.results:
         with st.container(border=True):
-            col_img, col_info = st.columns([1, 3])
+            c_img, c_info = st.columns([1, 2])
             
-            orig = load_image_from_path(item['original_path'])
-            res = load_image_from_path(item['result_path'])
+            orig = load_image_optimized(item['original_path'])
+            res = load_image_optimized(item['result_path'])
 
-            with col_img:
-                if res:
-                    st.image(res, use_container_width=True)
-                    if st.button("🔍 확대", key=f"zoom_r_{item['id']}"): show_full_image(item['result_path'], item['name'])
+            with c_img:
+                if res: st.image(res, use_container_width=True)
             
-            with col_info:
-                duration_txt = f"⏱️ {item['duration']:.2f}초" if 'duration' in item else ""
-                st.markdown(f"### ✅ {item['name']} {duration_txt}")
+            with c_info:
+                st.markdown(f"### {item['name']}")
+                st.caption(f"⏱️ 소요시간: {item['duration']:.1f}초")
                 
                 if use_slider and orig and res:
                     with st.expander("🆚 비교 보기"):
                         if orig.size != res.size: orig = orig.resize(res.size)
                         image_comparison(img1=orig, img2=res, label1="Original", label2="Trans", in_memory=True)
                 
-                cols = st.columns(3)
-                if cols[0].button("🔄 재작업", key=f"re_{item['id']}"):
-                    st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': item['name'], 'image_path': item['original_path'], 'status': 'pending', 'error_msg': None})
-                    st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
-                    st.rerun()
-                if cols[1].button("🗑️ 삭제", key=f"rm_{item['id']}"):
-                    st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
-                    st.rerun()
+                d1, d2 = st.columns(2)
                 
+                # 개별 다운로드
                 if res:
                     buf = io.BytesIO()
                     res.save(buf, format="PNG")
-                    cols[2].download_button("⬇️ 다운", data=buf.getvalue(), file_name=f"kor_{item['name']}", mime="image/png", key=f"dl_{item['id']}")
-def auto_process_step(api_key, prompt, resolution, temperature, use_autofix):
-    if not st.session_state.is_auto_running: return
-    pending = [i for i in st.session_state.job_queue if i['status'] == 'pending']
-    
-    if not pending:
-        st.session_state.is_auto_running = False
-        st.toast("✅ 모든 작업 완료!")
-        time.sleep(1)
-        st.rerun()
-        return
+                    d1.download_button("⬇️ 다운로드", data=buf.getvalue(), file_name=f"kor_{item['name']}.png", mime="image/png", key=f"dl_{item['id']}")
+                
+                if d2.button("🗑️ 삭제", key=f"rm_{item['id']}"):
+                    st.session_state.results = [x for x in st.session_state.results if x['id'] != item['id']]
+                    st.rerun()
 
-    item = pending[0]
-    
-    original_img = load_image_from_path(item['image_path'])
-    if not original_img:
-        item['status'] = 'error'
-        item['error_msg'] = "이미지 파일 유실됨"
-        st.rerun()
-        return
-
-    start_time = time.time()
-    
-    with st.status(f"🔄 자동 처리 중... [{item['name']}]", expanded=True) as status:
-        if use_autofix:
-            res_img, err = generate_with_auto_fix(api_key, prompt, original_img, resolution, temperature, status_container=status)
-        else:
-            res_img, err = generate_with_auto_fix(api_key, prompt, original_img, resolution, temperature, max_retries=0, status_container=status)
-
-        end_time = time.time()
-        duration = end_time - start_time
-
-        if res_img:
-            res_path = save_image_to_temp(res_img, f"result_{item['name']}")
-            status.update(label=f"✅ 완료! ({duration:.2f}초)", state="complete", expanded=False)
-            st.session_state.results.append({
-                'id': str(uuid.uuid4()), 
-                'name': item['name'], 
-                'original_path': item['image_path'], 
-                'result_path': res_path,
-                'duration': duration
-            })
-            st.session_state.job_queue = [x for x in st.session_state.job_queue if x['id'] != item['id']]
-        else:
-            status.update(label="❌ 실패", state="error")
-            item['status'] = 'error'
-            item['error_msg'] = err
-    
-    time.sleep(1)
-    st.rerun()
-
-# --- [6. 메인 실행] ---
+# --- [7. 메인 실행] ---
 def main():
     init_session_state()
-    api_key, use_slider, prompt, resolution, temperature, use_autofix = render_sidebar()
     
-    st.title("🍌 Nano Banana")
-    st.markdown("**Webtoon Engine** (Anti-Vertical & CSS Logic)")
+    # 사이드바에서 설정값 받기
+    api_key, use_slider, prompt, resolution, temperature, use_autofix, verify_mode = render_sidebar()
     
     handle_file_upload()
-    render_queue(api_key, prompt, resolution, temperature, use_autofix)
-    render_results(use_slider)
-
+    
+    # 큐 렌더링 및 자동 실행 체크
+    render_queue(api_key, prompt, resolution, temperature, use_autofix, verify_mode)
+    
     if st.session_state.is_auto_running:
-        auto_process_step(api_key, prompt, resolution, temperature, use_autofix)
+        auto_process_step(api_key, prompt, resolution, temperature, use_autofix, verify_mode)
+        
+    render_results(use_slider)
 
 if __name__ == "__main__":
     main()
-
-
-
-
