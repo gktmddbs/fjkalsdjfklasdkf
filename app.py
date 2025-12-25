@@ -457,10 +457,11 @@ def handle_file_upload():
         files = st.file_uploader("이미지 추가", type=['png', 'jpg', 'jpeg', 'zip'], accept_multiple_files=True, key=f"uploader_{st.session_state.uploader_key}")
     with col2:
         st.write("클립보드:")
+        # paste_image_button은 image_data 속성에 PIL Image 객체를 담아 반환합니다.
         paste_btn = paste_image_button(label="📋 붙여넣기", text_color="#ffffff", background_color="#FF4B4B", hover_background_color="#FF0000")
 
     new_cnt = 0
-    # 파일 업로드 처리
+    # 1. 파일 업로드 처리
     if files:
         with st.spinner("파일 처리 중..."):
             for f in files:
@@ -483,13 +484,23 @@ def handle_file_upload():
                         st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f.name, 'image_path': path, 'status': 'pending', 'error_msg': None})
                         new_cnt += 1
     
-    # 붙여넣기 처리
+    # 2. 붙여넣기(Paste) 처리 [수정된 부분]
     if paste_btn.image_data:
-        curr_hash = hashlib.md5(io.BytesIO(paste_btn.image_data_bytes).getvalue()).hexdigest()
+        # paste_btn.image_data는 이미 PIL Image 객체입니다.
+        pasted_img = paste_btn.image_data
+        
+        # 해시 생성을 위해 바이트로 변환 (기존 유틸 함수 활용)
+        img_bytes = image_to_bytes(pasted_img)
+        curr_hash = hashlib.md5(img_bytes).hexdigest()
+        
         if st.session_state.last_pasted_hash != curr_hash:
-            img = load_image_optimized(io.BytesIO(paste_btn.image_data_bytes))
-            if img:
-                path = save_image_to_temp(img, f"paste_{int(time.time())}.png")
+            # 이미지 전처리 (회전 보정 등) 수행
+            # PIL Image 객체이므로 load_image_optimized 대신 직접 처리하거나 그대로 사용
+            # 여기서는 안전하게 바이트IO를 거쳐 최적화 함수를 통과시킵니다.
+            processed_img = load_image_optimized(io.BytesIO(img_bytes))
+            
+            if processed_img:
+                path = save_image_to_temp(processed_img, f"paste_{int(time.time())}.png")
                 st.session_state.job_queue.append({'id': str(uuid.uuid4()), 'name': f"paste_{int(time.time())}.png", 'image_path': path, 'status': 'pending', 'error_msg': None})
                 st.session_state.last_pasted_hash = curr_hash
                 new_cnt += 1
@@ -632,3 +643,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
